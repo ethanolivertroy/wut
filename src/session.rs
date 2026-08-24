@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
@@ -33,6 +33,36 @@ pub struct Session {
     pub updated_at: u64,
     pub settings: Settings,
     pub turns: Vec<Turn>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Summary {
+    pub id: String,
+    pub agent: String,
+    pub cwd: String,
+    pub updated_at: u64,
+    pub settings: Settings,
+    pub turn_count: usize,
+    native_session_id: String,
+    path: PathBuf,
+    legacy: bool,
+}
+
+#[derive(Deserialize)]
+struct StoredSummary {
+    #[serde(default)]
+    id: Option<String>,
+    agent: String,
+    #[serde(default)]
+    native_session_id: Option<String>,
+    #[serde(default)]
+    harness_session_id: Option<String>,
+    cwd: String,
+    updated_at: u64,
+    #[serde(default)]
+    settings: Option<Settings>,
+    #[serde(default)]
+    turns: Vec<IgnoredAny>,
 }
 
 impl Session {
@@ -78,23 +108,47 @@ pub fn load_all() -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+pub fn load_summaries() -> Result<Vec<Summary>> {
+    let current = load_summary_dir(&store::session_dir()?, false)?;
+    let mut sessions = if current.is_empty() {
+        load_summary_dir(&store::legacy_session_dir()?, true)?
+    } else {
+        current
+    };
+    let mut seen = HashSet::new();
+    sessions
+        .retain(|session| seen.insert((session.agent.clone(), session.native_session_id.clone())));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    Ok(sessions)
+}
+
 pub fn latest(cwd: &Path) -> Result<Session> {
     let cwd = cwd.to_string_lossy();
-    load_all()?
+    let summary = load_summaries()?
         .into_iter()
         .filter(|session| session.cwd == cwd)
         .max_by_key(|session| session.updated_at)
         .ok_or_else(|| {
             Error::new("no saved wut sessions for this directory")
                 .hint("start one with 'wut QUESTION' or list all with 'wut sessions'")
-        })
+        })?;
+    load_path(&summary.path, summary.legacy)
 }
 
 pub fn find(id: &str) -> Result<Session> {
-    load_all()?
+    validate_local_id(id)?;
+    let path = store::session_dir()?.join(format!("{id}.json"));
+    if path.exists() {
+        let session = load_path(&path, false)?;
+        if session.id == id {
+            return Ok(session);
+        }
+    }
+    let summary = load_summaries()?
         .into_iter()
         .find(|session| session.id == id)
-        .ok_or_else(|| Error::new(format!("unknown session '{id}'")).hint("run 'wut sessions'"))
+        .ok_or_else(|| Error::new(format!("unknown session '{id}'")).hint("run 'wut sessions'"))?;
+    load_path(&summary.path, summary.legacy)
 }
 
 fn load_dir(directory: &Path, legacy: bool) -> Result<Vec<Session>> {
@@ -112,23 +166,104 @@ fn load_dir(directory: &Path, legacy: bool) -> Result<Vec<Session>> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path)
-            .map_err(|error| Error::new(format!("could not read '{}': {error}", path.display())))?;
+        sessions.push(load_path(&path, legacy)?);
+    }
+    Ok(sessions)
+}
+
+fn load_path(path: &Path, legacy: bool) -> Result<Session> {
+    let bytes = fs::read(path)
+        .map_err(|error| Error::new(format!("could not read '{}': {error}", path.display())))?;
+    let session = if legacy {
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             Error::new(format!("could not parse '{}': {error}", path.display()))
         })?;
-        let session = if legacy || value.get("native_session_id").is_none() {
-            parse_legacy(&value)
-        } else {
-            serde_json::from_value::<Session>(value).map_err(|error| {
-                Error::new(format!("invalid session '{}': {error}", path.display()))
-            })
-        }?;
-        validate_local_id(&session.id)
-            .map_err(|error| error.context(format!("invalid session '{}'", path.display())))?;
-        sessions.push(session);
+        parse_legacy(&value)?
+    } else {
+        match serde_json::from_slice::<Session>(&bytes) {
+            Ok(session) => session,
+            Err(current_error) => {
+                let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                    Error::new(format!("could not parse '{}': {error}", path.display()))
+                })?;
+                if value.get("native_session_id").is_none() {
+                    parse_legacy(&value)?
+                } else {
+                    return Err(Error::new(format!(
+                        "invalid session '{}': {current_error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    };
+    validate_local_id(&session.id)
+        .map_err(|error| error.context(format!("invalid session '{}'", path.display())))?;
+    Ok(session)
+}
+
+fn load_summary_dir(directory: &Path, legacy: bool) -> Result<Vec<Summary>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(directory).map_err(|error| {
+        Error::new(format!("could not read '{}': {error}", directory.display()))
+    })?;
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| Error::new(format!("could not read a session entry: {error}")))?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| Error::new(format!("could not read '{}': {error}", path.display())))?;
+        sessions.push(parse_summary(&bytes, path, legacy)?);
     }
     Ok(sessions)
+}
+
+fn parse_summary(bytes: &[u8], path: PathBuf, directory_legacy: bool) -> Result<Summary> {
+    let stored: StoredSummary = serde_json::from_slice(bytes)
+        .map_err(|error| Error::new(format!("invalid session '{}': {error}", path.display())))?;
+    let (native_session_id, legacy) = match (
+        stored.native_session_id,
+        stored.harness_session_id,
+        directory_legacy,
+    ) {
+        (Some(id), _, false) => (id, false),
+        (_, Some(id), _) => (id, true),
+        _ => {
+            return Err(Error::new(format!(
+                "invalid session '{}': missing native session ID",
+                path.display()
+            )));
+        }
+    };
+    let id = if legacy {
+        local_id(&stored.agent, &native_session_id)
+    } else {
+        stored.id.ok_or_else(|| {
+            Error::new(format!(
+                "invalid session '{}': missing local session ID",
+                path.display()
+            ))
+        })?
+    };
+    validate_local_id(&id)
+        .map_err(|error| error.context(format!("invalid session '{}'", path.display())))?;
+    Ok(Summary {
+        id,
+        agent: stored.agent,
+        cwd: stored.cwd,
+        updated_at: stored.updated_at,
+        settings: stored.settings.unwrap_or_default(),
+        turn_count: stored.turns.len(),
+        native_session_id,
+        path,
+        legacy,
+    })
 }
 
 fn parse_legacy(value: &Value) -> Result<Session> {
@@ -201,7 +336,56 @@ pub fn directory() -> Result<PathBuf> {
 mod tests {
     use serde_json::json;
 
-    use super::{Session, Settings, local_id, parse_legacy};
+    use super::{Session, Settings, local_id, parse_legacy, parse_summary};
+
+    #[test]
+    fn summaries_count_turns_without_loading_transcript_fields() {
+        let summary = parse_summary(
+            br#"{
+                "id": "cursor-test",
+                "agent": "cursor",
+                "native_session_id": "native-1",
+                "cwd": "/tmp/project",
+                "updated_at": 42,
+                "settings": {"model": "fast"},
+                "turns": [
+                    {"user": "secret question", "assistant": "secret answer"},
+                    {"future": {"shape": "does not matter for a summary"}}
+                ]
+            }"#,
+            std::path::PathBuf::from("/tmp/cursor-test.json"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(summary.id, "cursor-test");
+        assert_eq!(summary.turn_count, 2);
+        assert_eq!(summary.settings.model.as_deref(), Some("fast"));
+        assert_eq!(summary.native_session_id, "native-1");
+        assert!(!summary.legacy);
+    }
+
+    #[test]
+    fn summaries_import_legacy_sessions_without_public_native_ids() {
+        let summary = parse_summary(
+            br#"{
+                "agent": "cursor",
+                "harness_session_id": "private-provider-id",
+                "cwd": "/tmp/project",
+                "updated_at": 42,
+                "settings": null,
+                "turns": [{"user": "hello", "assistant": "hi"}]
+            }"#,
+            std::path::PathBuf::from("/tmp/legacy.json"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(summary.id, local_id("cursor", "private-provider-id"));
+        assert!(!summary.id.contains("private-provider-id"));
+        assert_eq!(summary.turn_count, 1);
+        assert!(summary.legacy);
+    }
 
     #[test]
     fn local_ids_are_stable_and_do_not_expose_native_ids() {

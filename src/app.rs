@@ -67,7 +67,7 @@ fn list_models(selected: Option<&str>) -> Result<()> {
 }
 
 fn list_sessions(as_json: bool) -> Result<()> {
-    let sessions = session::load_all()?;
+    let sessions = session::load_summaries()?;
     if as_json {
         let summaries = sessions
             .iter()
@@ -77,7 +77,7 @@ fn list_sessions(as_json: bool) -> Result<()> {
                     "agent": session.agent,
                     "cwd": session.cwd,
                     "updated_at": session.updated_at,
-                    "turn_count": session.turns.len(),
+                    "turn_count": session.turn_count,
                     "model": session.settings.model,
                     "reasoning": session.settings.reasoning,
                 })
@@ -93,10 +93,7 @@ fn list_sessions(as_json: bool) -> Result<()> {
         writeln!(
             stdout,
             "{}\t{}\t{} turns\t{}",
-            session.id,
-            session.agent,
-            session.turns.len(),
-            session.cwd
+            session.id, session.agent, session.turn_count, session.cwd
         )
         .map_err(output_error)?;
     }
