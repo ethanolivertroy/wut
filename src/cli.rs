@@ -2,263 +2,275 @@ use std::ffi::OsString;
 
 use crate::error::{Error, Result};
 
-pub const HELP: &str = "wut asks coding agents without letting them change your files.\n\n\
-Usage:\n  wut [OPTIONS] [QUESTION...]\n  wut -c [QUESTION...]\n  wut --session ID [QUESTION...]\n  wut agents [--json]\n  wut models [AGENT]\n  wut sessions [--json]\n  wut config [show [--json] | path | set KEY VALUE]\n\n\
-Options:\n  -a, --agent ID         choose an agent for a new session\n  -m, --model ID         override the model\n  -r, --reasoning LEVEL  override reasoning effort\n  -c, --continue         continue the latest session in this directory\n      --session ID       continue a saved wut session\n  -h, --help             print help\n  -V, --version          print version\n\n\
-With no question, wut starts a plain interactive session. Use -- before a\nquestion that starts with a dash. Answers go to stdout; prompts and errors go\nto stderr.\n";
+pub const HELP: &str = concat!(
+    "Ask, then do. Follow up when you need to.\n",
+    "\n",
+    "Usage:\n",
+    "  wut [QUESTION...]\n",
+    "  wut -c [QUESTION...]\n",
+    "  wut --sessions\n",
+    "  wut --settings\n",
+    "  wut --upgrade\n",
+    "\n",
+    "With no question, wut starts an interactive session.\n",
+    "\n",
+    "Options:\n",
+    "  -c, --continue      Continue the latest session here\n",
+    "  -s, --sessions      Choose a saved session to continue\n",
+    "      --settings      Configure defaults and instructions\n",
+    "      --upgrade       Upgrade to the latest release\n",
+    "  -h, --help          Print help\n",
+    "  -V, --version       Print version\n",
+);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ask {
-    pub question: Option<String>,
-    pub continuation: bool,
-    pub session: Option<String>,
-    pub agent: Option<String>,
-    pub model: Option<String>,
-    pub reasoning: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ConfigCommand {
-    Show { json: bool },
-    Path,
-    Set { key: String, value: String },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Command {
-    Ask(Ask),
-    Agents { json: bool },
-    Models { agent: Option<String> },
-    Sessions { json: bool },
-    Config(ConfigCommand),
+#[derive(Debug, Eq, PartialEq)]
+pub enum Mode {
+    Interactive,
+    OneShot(String),
+    Continue(Vec<String>),
+    Sessions,
+    Settings,
+    Upgrade,
+    UpdateCheck,
     Help,
     Version,
 }
 
-pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Command> {
-    let args = args
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|_| Error::usage("arguments must be valid UTF-8"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    match args.first().map(String::as_str) {
-        Some("agents") => {
-            return parse_json_only("agents", &args[1..], |json| Command::Agents { json });
-        }
-        Some("models") => return parse_models(&args[1..]),
-        Some("sessions") => {
-            return parse_json_only("sessions", &args[1..], |json| Command::Sessions { json });
-        }
-        Some("config") => return parse_config(&args[1..]),
-        _ => {}
-    }
-
-    parse_ask(&args)
-}
-
-fn parse_json_only(
-    name: &str,
-    args: &[String],
-    command: impl FnOnce(bool) -> Command,
-) -> Result<Command> {
-    match args {
-        [] => Ok(command(false)),
-        [flag] if flag == "--json" => Ok(command(true)),
-        _ => Err(Error::usage(format!(
-            "'{name}' accepts only the optional '--json' flag"
-        ))),
-    }
-}
-
-fn parse_models(args: &[String]) -> Result<Command> {
-    match args {
-        [] => Ok(Command::Models { agent: None }),
-        [agent] if !agent.starts_with('-') => Ok(Command::Models {
-            agent: Some(agent.clone()),
-        }),
-        _ => Err(Error::usage("usage: wut models [AGENT]")),
-    }
-}
-
-fn parse_config(args: &[String]) -> Result<Command> {
-    match args {
-        [] => Ok(Command::Config(ConfigCommand::Show { json: false })),
-        [single] if single == "show" => Ok(Command::Config(ConfigCommand::Show { json: false })),
-        [single] if single == "--json" => Ok(Command::Config(ConfigCommand::Show { json: true })),
-        [show, json] if show == "show" && json == "--json" => {
-            Ok(Command::Config(ConfigCommand::Show { json: true }))
-        }
-        [single] if single == "path" => Ok(Command::Config(ConfigCommand::Path)),
-        [set, key, value] if set == "set" => Ok(Command::Config(ConfigCommand::Set {
-            key: key.clone(),
-            value: value.clone(),
-        })),
-        _ => Err(Error::usage(
-            "usage: wut config [show [--json] | path | set KEY VALUE]",
-        )),
-    }
-}
-
-fn parse_ask(args: &[String]) -> Result<Command> {
-    let mut ask = Ask {
-        question: None,
-        continuation: false,
-        session: None,
-        agent: None,
-        model: None,
-        reasoning: None,
-    };
+pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Mode> {
     let mut words = Vec::new();
     let mut options = true;
-    let mut index = 0;
+    let mut resume = false;
+    let mut sessions = false;
+    let mut settings = false;
+    let mut upgrade = false;
+    let mut update_check = false;
+    for arg in args {
+        let arg = arg
+            .into_string()
+            .map_err(|_| Error::usage("arguments must be valid UTF-8"))?;
 
-    while index < args.len() {
-        let arg = &args[index];
-        if options && arg == "--" {
-            options = false;
-            index += 1;
-            continue;
-        }
         if options {
             match arg.as_str() {
-                "-h" | "--help" => return Ok(Command::Help),
-                "-V" | "--version" => return Ok(Command::Version),
+                "--" => {
+                    options = false;
+                    continue;
+                }
+                "-h" | "--help" => {
+                    return Ok(Mode::Help);
+                }
+                "-V" | "--version" => {
+                    return Ok(Mode::Version);
+                }
                 "-c" | "--continue" => {
-                    if ask.continuation {
+                    if resume {
                         return Err(Error::usage("use '--continue' only once"));
                     }
-                    ask.continuation = true;
-                    index += 1;
+                    resume = true;
                     continue;
                 }
-                "-a" | "--agent" => {
-                    ask.agent = Some(take_value(args, &mut index, arg)?);
+                "-s" | "--sessions" => {
+                    sessions = true;
                     continue;
                 }
-                "-m" | "--model" => {
-                    ask.model = Some(take_value(args, &mut index, arg)?);
+                "--settings" => {
+                    settings = true;
                     continue;
                 }
-                "-r" | "--reasoning" => {
-                    ask.reasoning = Some(take_value(args, &mut index, arg)?);
+                "--upgrade" => {
+                    if upgrade {
+                        return Err(Error::usage("use '--upgrade' only once"));
+                    }
+                    upgrade = true;
                     continue;
                 }
-                "--session" => {
-                    ask.session = Some(take_value(args, &mut index, arg)?);
+                "--internal-update-check" => {
+                    if update_check {
+                        return Err(Error::usage("use '--internal-update-check' only once"));
+                    }
+                    update_check = true;
                     continue;
                 }
-                _ if arg.starts_with("--agent=") => ask.agent = split_value(arg, "--agent=")?,
-                _ if arg.starts_with("--model=") => ask.model = split_value(arg, "--model=")?,
-                _ if arg.starts_with("--reasoning=") => {
-                    ask.reasoning = split_value(arg, "--reasoning=")?
-                }
-                _ if arg.starts_with("--session=") => ask.session = split_value(arg, "--session=")?,
                 _ if arg.starts_with('-') => {
                     return Err(Error::usage(format!("unknown option '{arg}'")));
                 }
-                _ => options = false,
+                _ => {}
             }
         }
-        words.push(arg.clone());
-        index += 1;
+
+        words.push(arg);
+        options = false;
     }
 
-    if ask.continuation && ask.session.is_some() {
+    if sessions && resume {
         return Err(Error::usage(
-            "--continue and --session cannot be used together",
+            "--sessions cannot be combined with --continue",
         ));
     }
-    if !words.is_empty() {
-        ask.question = Some(words.join(" "));
+    if sessions && !words.is_empty() {
+        return Err(Error::new(
+            "--sessions does not accept a question",
+            "run 'wut --sessions' by itself",
+        ));
     }
-    Ok(Command::Ask(ask))
-}
-
-fn take_value(args: &[String], index: &mut usize, option: &str) -> Result<String> {
-    *index += 1;
-    let value = args
-        .get(*index)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| Error::usage(format!("'{option}' requires a value")))?
-        .clone();
-    *index += 1;
-    Ok(value)
-}
-
-fn split_value(arg: &str, prefix: &str) -> Result<Option<String>> {
-    let value = &arg[prefix.len()..];
-    if value.is_empty() {
-        Err(Error::usage(format!(
-            "'{}' requires a value",
-            prefix.trim_end_matches('=')
-        )))
+    if settings && (sessions || resume || !words.is_empty()) {
+        return Err(Error::new(
+            "--settings cannot be combined with other arguments",
+            "run 'wut --settings' by itself",
+        ));
+    }
+    if upgrade && (settings || sessions || resume || !words.is_empty()) {
+        return Err(Error::new(
+            "--upgrade cannot be combined with other arguments",
+            "run 'wut --upgrade' by itself",
+        ));
+    }
+    if update_check && (upgrade || settings || sessions || resume || !words.is_empty()) {
+        return Err(Error::usage(
+            "--internal-update-check cannot be combined with other arguments",
+        ));
+    }
+    let mode = if update_check {
+        Mode::UpdateCheck
+    } else if upgrade {
+        Mode::Upgrade
+    } else if settings {
+        Mode::Settings
+    } else if sessions {
+        Mode::Sessions
+    } else if resume {
+        Mode::Continue(words)
+    } else if words.is_empty() {
+        Mode::Interactive
     } else {
-        Ok(Some(value.to_owned()))
-    }
+        Mode::OneShot(words.join(" "))
+    };
+
+    Ok(mode)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{Mode, parse};
     use std::ffi::OsString;
-
-    use super::{Ask, Command, ConfigCommand, parse};
 
     fn args(values: &[&str]) -> impl Iterator<Item = OsString> {
         values
             .iter()
-            .map(OsString::from)
+            .map(|value| OsString::from(*value))
             .collect::<Vec<_>>()
             .into_iter()
     }
 
     #[test]
-    fn parses_one_shot_with_overrides() {
+    fn help_uses_only_the_wut_command_identity() {
+        assert!(super::HELP.contains("  wut [QUESTION...]"));
+        assert!(super::HELP.contains("  wut --upgrade"));
+        assert!(!super::HELP.contains("  ask "));
+    }
+
+    #[test]
+    fn no_arguments_selects_interactive_mode() {
+        assert_eq!(parse(args(&[])).unwrap(), Mode::Interactive);
+    }
+
+    #[test]
+    fn words_are_joined_into_one_question() {
         assert_eq!(
-            parse(args(&["-a", "cursor", "-m", "grok-fast", "why?"])).unwrap(),
-            Command::Ask(Ask {
-                question: Some("why?".into()),
-                continuation: false,
-                session: None,
-                agent: Some("cursor".into()),
-                model: Some("grok-fast".into()),
-                reasoning: None,
-            })
+            parse(args(&["why", "is", "this?"])).unwrap(),
+            Mode::OneShot("why is this?".into()),
         );
     }
 
     #[test]
-    fn parses_dash_prefixed_words_after_question_starts() {
-        let command = parse(args(&["compare", "-O2", "and", "-O3"])).unwrap();
-        let Command::Ask(ask) = command else {
-            panic!("expected ask command");
-        };
-        assert_eq!(ask.question.as_deref(), Some("compare -O2 and -O3"));
-    }
-
-    #[test]
-    fn parses_continue_and_explicit_session() {
-        assert!(matches!(parse(args(&["-c"])).unwrap(), Command::Ask(_)));
-        assert!(matches!(
-            parse(args(&["--session", "cursor-deadbeef", "next"])).unwrap(),
-            Command::Ask(_)
-        ));
-        assert!(parse(args(&["-c", "--session", "x"])).is_err());
-    }
-
-    #[test]
-    fn parses_scriptable_commands() {
+    fn separator_allows_question_starting_with_dash() {
         assert_eq!(
-            parse(args(&["config", "set", "agent", "grok"])).unwrap(),
-            Command::Config(ConfigCommand::Set {
-                key: "agent".into(),
-                value: "grok".into(),
-            })
+            parse(args(&["--", "--why?"])).unwrap(),
+            Mode::OneShot("--why?".into()),
+        );
+    }
+
+    #[test]
+    fn parses_continue() {
+        assert_eq!(parse(args(&["-c"])).unwrap(), Mode::Continue(Vec::new()));
+    }
+
+    #[test]
+    fn parses_sessions_shorthand() {
+        assert_eq!(parse(args(&["-s"])).unwrap(), Mode::Sessions);
+    }
+
+    #[test]
+    fn parses_standalone_settings() {
+        assert_eq!(parse(args(&["--settings"])).unwrap(), Mode::Settings);
+        assert!(parse(args(&["-S"])).is_err());
+        assert!(parse(args(&["--settings", "question"])).is_err());
+    }
+
+    #[test]
+    fn parses_version_flags() {
+        assert_eq!(parse(args(&["-V"])).unwrap(), Mode::Version);
+        assert_eq!(parse(args(&["--version"])).unwrap(), Mode::Version);
+    }
+
+    #[test]
+    fn internal_update_worker_must_be_standalone() {
+        assert_eq!(
+            parse(args(&["--internal-update-check"])).unwrap(),
+            Mode::UpdateCheck
+        );
+        assert!(parse(args(&["--internal-update-check", "question"])).is_err());
+        assert!(parse(args(&["--internal-update-check", "--upgrade"])).is_err());
+    }
+
+    #[test]
+    fn upgrade_must_be_standalone() {
+        assert_eq!(parse(args(&["--upgrade"])).unwrap(), Mode::Upgrade);
+        assert!(parse(args(&["--upgrade", "now"])).is_err());
+        assert!(parse(args(&["--upgrade", "-c"])).is_err());
+        assert!(parse(args(&["--upgrade", "--settings"])).is_err());
+        assert!(parse(args(&["--upgrade", "--upgrade"])).is_err());
+        assert_eq!(
+            parse(args(&["--", "--upgrade"])).unwrap(),
+            Mode::OneShot("--upgrade".into())
+        );
+    }
+
+    #[test]
+    fn continue_keeps_follow_up_words() {
+        assert_eq!(
+            parse(args(&["-c", "what", "next?"])).unwrap(),
+            Mode::Continue(vec!["what".into(), "next?".into()])
+        );
+    }
+
+    #[test]
+    fn continue_id_syntax_is_not_supported() {
+        assert!(parse(args(&["--continue=abc"])).is_err());
+    }
+
+    #[test]
+    fn history_flag_is_not_supported() {
+        assert!(parse(args(&["-c", "--history"])).is_err());
+    }
+
+    #[test]
+    fn unknown_option_is_an_error() {
+        assert!(parse(args(&["--wat"])).is_err());
+    }
+
+    #[test]
+    fn option_like_words_after_the_question_are_prompt_text() {
+        assert_eq!(
+            parse(args(&["hello", "--agent", "claude"])).unwrap(),
+            Mode::OneShot("hello --agent claude".into())
         );
         assert_eq!(
-            parse(args(&["sessions", "--json"])).unwrap(),
-            Command::Sessions { json: true }
+            parse(args(&["hello", "--model=gpt-5.6-luna"])).unwrap(),
+            Mode::OneShot("hello --model=gpt-5.6-luna".into())
+        );
+        assert_eq!(
+            parse(args(&["hello", "--reasoning=low"])).unwrap(),
+            Mode::OneShot("hello --reasoning=low".into())
         );
     }
 }
