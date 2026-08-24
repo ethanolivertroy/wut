@@ -112,13 +112,35 @@ pub fn resolve(name: &str) -> Result<&'static Definition> {
 
 pub fn invocation(agent: &str, request: &Request<'_>) -> Result<Invocation> {
     let definition = resolve(agent)?;
+    let opencode_config = if definition.id == "opencode" {
+        std::env::var("OPENCODE_CONFIG_CONTENT").ok()
+    } else {
+        None
+    };
+    invocation_for_definition(definition, request, opencode_config.as_deref())
+}
+
+#[cfg(test)]
+fn invocation_with_opencode_config(
+    agent: &str,
+    request: &Request<'_>,
+    opencode_config: Option<&str>,
+) -> Result<Invocation> {
+    invocation_for_definition(resolve(agent)?, request, opencode_config)
+}
+
+fn invocation_for_definition(
+    definition: &Definition,
+    request: &Request<'_>,
+    opencode_config: Option<&str>,
+) -> Result<Invocation> {
     let invocation = match definition.id {
         "cursor" => cursor(definition, request),
         "grok" => grok(definition, request),
         "codex" => codex(definition, request),
         "claude" => claude(definition, request),
         "pi" => pi(definition, request),
-        "opencode" => opencode(definition, request)?,
+        "opencode" => opencode(definition, request, opencode_config)?,
         _ => unreachable!("all registered agents have an invocation"),
     };
     Ok(invocation)
@@ -297,7 +319,11 @@ fn pi(definition: &Definition, request: &Request<'_>) -> Invocation {
     invocation
 }
 
-fn opencode(definition: &Definition, request: &Request<'_>) -> Result<Invocation> {
+fn opencode(
+    definition: &Definition,
+    request: &Request<'_>,
+    existing_config: Option<&str>,
+) -> Result<Invocation> {
     let mut invocation = Invocation::new(definition, Kind::OpenCode);
     invocation.args([
         "--pure",
@@ -320,7 +346,7 @@ fn opencode(definition: &Definition, request: &Request<'_>) -> Result<Invocation
     invocation.arg(request.question);
     invocation.env(
         "OPENCODE_CONFIG_CONTENT",
-        inline_opencode_config(request.instructions)?,
+        inline_opencode_config(existing_config, request.instructions)?,
     );
     invocation.env("OPENCODE_AUTO_SHARE", "false");
     Ok(invocation)
@@ -335,14 +361,17 @@ fn combined_prompt(request: &Request<'_>) -> String {
     }
 }
 
-fn inline_opencode_config(instructions: Option<&str>) -> Result<String> {
-    let mut config = match std::env::var("OPENCODE_CONFIG_CONTENT") {
-        Ok(existing) => serde_json::from_str::<Value>(&existing)
+fn inline_opencode_config(
+    existing_config: Option<&str>,
+    instructions: Option<&str>,
+) -> Result<String> {
+    let mut config = match existing_config {
+        Some(existing) => serde_json::from_str::<Value>(existing)
             .map_err(|error| Error::new(format!("invalid OPENCODE_CONFIG_CONTENT: {error}")))?
             .as_object()
             .cloned()
             .ok_or_else(|| Error::new("OPENCODE_CONFIG_CONTENT must be a JSON object"))?,
-        Err(_) => Map::new(),
+        None => Map::new(),
     };
     let mut agent = json!({
         "description": "Read-only questions through wut",
@@ -428,7 +457,7 @@ fn command_error(definition: &Definition, status: std::process::ExitStatus, stde
 mod tests {
     use serde_json::Value;
 
-    use super::{Request, inline_opencode_config, invocation, resolve};
+    use super::{Request, inline_opencode_config, invocation_with_opencode_config, resolve};
 
     fn request<'a>(session: Option<&'a str>) -> Request<'a> {
         request_with_question(session, "why?")
@@ -445,7 +474,7 @@ mod tests {
     }
 
     fn args(agent: &str, request: &Request<'_>) -> Vec<String> {
-        invocation(agent, request)
+        invocation_with_opencode_config(agent, request, None)
             .unwrap()
             .args
             .iter()
@@ -483,7 +512,8 @@ mod tests {
         let pi = args("pi", &request(Some("s")));
         assert!(has_pair(&pi, "--tools", "read,grep,find,ls"));
 
-        let opencode = invocation("opencode", &request(Some("s"))).unwrap();
+        let opencode =
+            invocation_with_opencode_config("opencode", &request(Some("s")), None).unwrap();
         let config = opencode
             .env
             .iter()
@@ -498,7 +528,8 @@ mod tests {
 
     #[test]
     fn opencode_blocks_secret_files() {
-        let config: Value = serde_json::from_str(&inline_opencode_config(None).unwrap()).unwrap();
+        let config: Value =
+            serde_json::from_str(&inline_opencode_config(None, None).unwrap()).unwrap();
         assert_eq!(config["permission"]["external_directory"], "deny");
         assert_eq!(
             config["agent"]["wut-read-only"]["permission"]["external_directory"],
