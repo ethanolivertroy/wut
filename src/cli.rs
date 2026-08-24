@@ -158,7 +158,7 @@ fn parse_ask(args: &[String]) -> Result<Command> {
                 _ if arg.starts_with('-') => {
                     return Err(Error::usage(format!("unknown option '{arg}'")));
                 }
-                _ => {}
+                _ => options = false,
             }
         }
         words.push(arg.clone());
@@ -226,6 +226,15 @@ mod tests {
                 reasoning: None,
             })
         );
+    }
+
+    #[test]
+    fn parses_dash_prefixed_words_after_question_starts() {
+        let command = parse(args(&["compare", "-O2", "and", "-O3"])).unwrap();
+        let Command::Ask(ask) = command else {
+            panic!("expected ask command");
+        };
+        assert_eq!(ask.question.as_deref(), Some("compare -O2 and -O3"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use serde_json::Value;
 
@@ -63,6 +63,117 @@ pub struct Response {
     pub streamed: bool,
 }
 
+const STDERR_LIMIT: usize = 1_024;
+const STDERR_HEAD_LIMIT: usize = STDERR_LIMIT / 2;
+const STDERR_TAIL_LIMIT: usize = STDERR_LIMIT - STDERR_HEAD_LIMIT;
+const STDERR_TRUNCATION_MARKER: &str = "\n[provider stderr truncated]\n";
+
+struct StderrCapture {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    total: usize,
+}
+
+impl StderrCapture {
+    fn into_detail(self) -> String {
+        let mut bytes = self.head.clone();
+        bytes.extend(self.tail.iter().copied());
+        let detail = String::from_utf8_lossy(&bytes).trim().to_owned();
+        if self.total <= STDERR_LIMIT && detail.len() <= STDERR_LIMIT {
+            return detail;
+        }
+
+        let payload_limit = STDERR_LIMIT - STDERR_TRUNCATION_MARKER.len();
+        let head_limit = payload_limit / 2;
+        let tail_limit = payload_limit - head_limit;
+        let head = String::from_utf8_lossy(&self.head);
+        let tail_bytes = self.tail.iter().copied().collect::<Vec<_>>();
+        let tail = String::from_utf8_lossy(&tail_bytes);
+        format!(
+            "{}{}{}",
+            utf8_prefix(&head, head_limit),
+            STDERR_TRUNCATION_MARKER,
+            utf8_suffix(&tail, tail_limit)
+        )
+        .trim()
+        .to_owned()
+    }
+}
+
+fn utf8_prefix(value: &str, limit: usize) -> &str {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn utf8_suffix(value: &str, limit: usize) -> &str {
+    let mut start = value.len().saturating_sub(limit);
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+fn capture_stderr(mut stderr: impl Read) -> StderrCapture {
+    let mut head = Vec::with_capacity(STDERR_HEAD_LIMIT);
+    let mut tail = std::collections::VecDeque::with_capacity(STDERR_TAIL_LIMIT);
+    let mut total = 0_usize;
+    let mut buffer = [0_u8; 4_096];
+    loop {
+        let read = match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+            Ok(read) => read,
+        };
+        total = total.saturating_add(read);
+        for byte in &buffer[..read] {
+            if head.len() < STDERR_HEAD_LIMIT {
+                head.push(*byte);
+            } else {
+                if tail.len() == STDERR_TAIL_LIMIT {
+                    tail.pop_front();
+                }
+                tail.push_back(*byte);
+            }
+        }
+    }
+    StderrCapture { head, tail, total }
+}
+
+pub(crate) struct BoundedOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+pub(crate) fn bounded_output(command: &mut Command) -> std::io::Result<BoundedOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take().expect("piped stdout is available");
+    let stderr = child.stderr.take().expect("piped stderr is available");
+    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+
+    let mut stdout_bytes = Vec::new();
+    let stdout_result = stdout.read_to_end(&mut stdout_bytes);
+    if stdout_result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait()?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| std::io::Error::other("provider stderr reader panicked"))?;
+    stdout_result?;
+
+    Ok(BoundedOutput {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr.into_detail(),
+    })
+}
+
 pub fn run(
     invocation: Invocation,
     on_delta: &mut dyn FnMut(&str) -> Result<()>,
@@ -94,12 +205,8 @@ pub fn run(
     })?;
 
     let stdout = child.stdout.take().expect("piped stdout is available");
-    let mut stderr = child.stderr.take().expect("piped stderr is available");
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        bytes
-    });
+    let stderr = child.stderr.take().expect("piped stderr is available");
+    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
 
     let mut decoder = Decoder::new(invocation.kind, invocation.agent_name);
     let mut stream_error = None;
@@ -133,7 +240,7 @@ pub fn run(
         return Err(error);
     }
     if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr);
+        let detail = stderr.into_detail();
         if detail.trim().is_empty() {
             return Err(Error::new(format!(
                 "{} exited with {status}",
@@ -142,8 +249,7 @@ pub fn run(
         }
         return Err(Error::new(format!(
             "{} failed: {}",
-            invocation.agent_name,
-            detail.trim()
+            invocation.agent_name, detail
         )));
     }
     decoder.finish()
@@ -380,9 +486,24 @@ fn message_text(message: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
+    use std::io::{self, BufRead, BufReader, Read};
 
-    use super::{Decoder, Kind, Response};
+    use super::{Decoder, Kind, Response, STDERR_LIMIT, capture_stderr};
+
+    struct InterruptedOnce {
+        interrupted: bool,
+        remaining: &'static [u8],
+    }
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.remaining.read(buffer)
+        }
+    }
 
     fn decode(kind: Kind, input: &str) -> Response {
         let mut decoder = Decoder::new(kind, "test agent");
@@ -483,5 +604,40 @@ mod tests {
             decoder.finish().unwrap_err().message(),
             "Grok reported an error: rate limited"
         );
+    }
+
+    #[test]
+    fn stderr_capture_retries_interrupted_reads() {
+        let capture = capture_stderr(InterruptedOnce {
+            interrupted: false,
+            remaining: b"final diagnostic",
+        });
+        assert_eq!(capture.into_detail(), "final diagnostic");
+    }
+
+    #[test]
+    fn stderr_detail_stays_bounded_after_lossy_utf8_conversion() {
+        let capture = capture_stderr(&vec![0xff; STDERR_LIMIT][..]);
+        let detail = capture.into_detail();
+        assert!(
+            detail.len() <= STDERR_LIMIT,
+            "detail was {} bytes",
+            detail.len()
+        );
+        assert!(detail.contains("provider stderr truncated"));
+    }
+
+    #[test]
+    fn stderr_detail_preserves_final_diagnostic_after_noisy_prefix() {
+        let mut input = vec![b'x'; STDERR_LIMIT * 4];
+        input.extend_from_slice(b"\nFINAL_AUTH_DIAGNOSTIC");
+        let detail = capture_stderr(&input[..]).into_detail();
+        assert!(
+            detail.len() <= STDERR_LIMIT,
+            "detail was {} bytes",
+            detail.len()
+        );
+        assert!(detail.contains("provider stderr truncated"));
+        assert!(detail.contains("FINAL_AUTH_DIAGNOSTIC"));
     }
 }

@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,19 +15,11 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_home()?.join("wut/config.json"))
 }
 
-pub fn legacy_config_path() -> Result<PathBuf> {
-    Ok(config_home()?.join("ask/config.json"))
-}
-
 pub fn session_dir() -> Result<PathBuf> {
     if let Some(path) = nonempty_env("WUT_STATE_DIR") {
         return Ok(PathBuf::from(path).join("sessions"));
     }
     Ok(state_home()?.join("wut/sessions"))
-}
-
-pub fn legacy_session_dir() -> Result<PathBuf> {
-    Ok(state_home()?.join("ask/sessions"))
 }
 
 fn config_home() -> Result<PathBuf> {
@@ -62,25 +54,48 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T, subject: &str) -> Result
     write_private(path, &bytes, subject)
 }
 
+fn create_private_directories(directory: &Path, subject: &str) -> Result<()> {
+    if directory.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    let mut current = Some(directory);
+    while let Some(path) = current {
+        if path.as_os_str().is_empty() || path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        current = path.parent();
+    }
+
+    for path in missing.into_iter().rev() {
+        let result = fs::DirBuilder::new().mode(0o700).create(&path);
+        match result {
+            Ok(()) => {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                    Error::new(format!(
+                        "could not secure {subject} directory '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(Error::new(format!(
+                    "could not create '{}': {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn write_private(path: &Path, bytes: &[u8], subject: &str) -> Result<()> {
     let directory = path
         .parent()
         .ok_or_else(|| Error::new(format!("invalid {subject} path")))?;
-    let created_directory = !directory.exists();
-    fs::create_dir_all(directory).map_err(|error| {
-        Error::new(format!(
-            "could not create '{}': {error}",
-            directory.display()
-        ))
-    })?;
-    if created_directory {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            Error::new(format!(
-                "could not secure '{}': {error}",
-                directory.display()
-            ))
-        })?;
-    }
+    create_private_directories(directory, subject)?;
 
     let name = path
         .file_name()
@@ -143,6 +158,29 @@ mod tests {
                 & 0o777,
             0o700
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn secures_every_directory_it_creates() {
+        let root = std::env::temp_dir().join(format!("wut-private-tree-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = root.join("first/second/value");
+
+        write_private(&path, b"data", "test").unwrap();
+
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        for directory in [root.join("first"), root.join("first/second")] {
+            assert_eq!(
+                fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

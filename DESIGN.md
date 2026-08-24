@@ -11,8 +11,12 @@
 - `--agent`, `--model`, and `--reasoning` override defaults for a new request.
 - `wut agents`, `wut models`, `wut sessions`, and `wut config` are scriptable and support JSON where useful.
 - Answers use stdout. Prompts, progress, and errors use stderr.
+- Provider stderr is drained safely but bounded to 1 KiB in user-facing failures.
+- Long provider diagnostics retain a bounded beginning and end so the final actionable error remains visible.
 - Every built-in agent is constrained with its strongest native read-only mode.
 - Authentication and agent installation are always out of scope.
+- `wut` never discovers or imports `ask` configuration, sessions, or executable overrides.
+- The managed zsh integration applies `noglob` before argument expansion, allowing an unescaped trailing `?` without changing global shell options.
 
 ## Architecture
 
@@ -35,7 +39,8 @@ Canonical paths:
 - config: `$WUT_CONFIG` or `$XDG_CONFIG_HOME/wut/config.json`
 - sessions: `$WUT_STATE_DIR/sessions` or `$XDG_STATE_HOME/wut/sessions`
 
-Canonical binary overrides are `WUT_<AGENT>_BIN`. If no `wut` config or sessions exist, version-2 `ask` data is read as a one-way compatibility source and written back only under `wut` paths. `ASK_*` binary overrides remain read aliases for one release.
+Canonical binary overrides are `WUT_<AGENT>_BIN`. Configuration and sessions are owned by
+`wut`; cross-product migration is explicit work, never an implicit startup side effect.
 
 ## Safety invariants
 
@@ -67,6 +72,6 @@ Static footprint remains below inherited `ask` v0.2.1 even though the release pr
 
 | Metric | Inherited `ask` | Runtime-first `wut` | Reduction |
 | --- | ---: | ---: | ---: |
-| Rust source lines | 6,783 | 2,510 | 63.0% |
-| Release binary | 721,648 bytes | 671,800 bytes | 6.9% |
+| Rust source lines | 6,783 | 2,625 | 61.3% |
+| Release binary | 721,648 bytes | 660,232 bytes | 8.5% |
 | Cargo dependency nodes | 34 | 17 | 50.0% |

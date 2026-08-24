@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Map, Value, json};
 
 use crate::error::{Error, Result};
-use crate::protocol::{Invocation, Kind};
+use crate::protocol::{Invocation, Kind, bounded_output};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Definition {
@@ -16,7 +16,6 @@ pub struct Definition {
     pub default_program: &'static str,
     pub read_only: &'static str,
     env: &'static str,
-    legacy_env: &'static str,
     aliases: &'static [&'static str],
 }
 
@@ -28,7 +27,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "cursor-agent",
         read_only: "ask mode",
         env: "WUT_CURSOR_BIN",
-        legacy_env: "ASK_CURSOR_BIN",
         aliases: &["cursor-agent"],
     },
     Definition {
@@ -38,7 +36,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "grok",
         read_only: "plan permission mode",
         env: "WUT_GROK_BIN",
-        legacy_env: "ASK_GROK_BIN",
         aliases: &["grok-cli"],
     },
     Definition {
@@ -48,7 +45,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "codex",
         read_only: "read-only sandbox",
         env: "WUT_CODEX_BIN",
-        legacy_env: "ASK_CODEX_BIN",
         aliases: &[],
     },
     Definition {
@@ -58,7 +54,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "claude",
         read_only: "plan permission mode",
         env: "WUT_CLAUDE_BIN",
-        legacy_env: "ASK_CLAUDE_BIN",
         aliases: &["claude-code"],
     },
     Definition {
@@ -68,7 +63,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "pi",
         read_only: "read, grep, find, and ls only",
         env: "WUT_PI_BIN",
-        legacy_env: "ASK_PI_BIN",
         aliases: &[],
     },
     Definition {
@@ -78,7 +72,6 @@ pub static DEFINITIONS: &[Definition] = &[
         default_program: "opencode",
         read_only: "deny-by-default permissions",
         env: "WUT_OPENCODE_BIN",
-        legacy_env: "ASK_OPENCODE_BIN",
         aliases: &["open-code"],
     },
 ];
@@ -93,9 +86,7 @@ pub struct Request<'a> {
 
 impl Definition {
     pub fn program(&self) -> OsString {
-        std::env::var_os(self.env)
-            .or_else(|| std::env::var_os(self.legacy_env))
-            .unwrap_or_else(|| self.default_program.into())
+        std::env::var_os(self.env).unwrap_or_else(|| self.default_program.into())
     }
 
     pub fn available(&self) -> bool {
@@ -159,9 +150,16 @@ pub fn models(agent: &str) -> Result<String> {
         _ => unreachable!(),
     }
     command.stdin(Stdio::null());
-    let output = command
-        .output()
-        .map_err(|error| start_error(definition, error))?;
+    let output = bounded_output(&mut command).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            start_error(definition, error)
+        } else {
+            Error::new(format!(
+                "could not run {} model-list command: {error}",
+                definition.name
+            ))
+        }
+    })?;
     if !output.status.success() {
         return Err(command_error(definition, output.status, &output.stderr));
     }
@@ -418,16 +416,11 @@ fn start_error(definition: &Definition, error: std::io::Error) -> Error {
     }
 }
 
-fn command_error(
-    definition: &Definition,
-    status: std::process::ExitStatus,
-    stderr: &[u8],
-) -> Error {
-    let detail = String::from_utf8_lossy(stderr);
-    if detail.trim().is_empty() {
+fn command_error(definition: &Definition, status: std::process::ExitStatus, stderr: &str) -> Error {
+    if stderr.trim().is_empty() {
         Error::new(format!("{} exited with {status}", definition.name))
     } else {
-        Error::new(format!("{} failed: {}", definition.name, detail.trim()))
+        Error::new(format!("{} failed: {}", definition.name, stderr.trim()))
     }
 }
 
