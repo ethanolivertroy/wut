@@ -145,6 +145,7 @@ fn continuation_loads_only_the_selected_full_transcript() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(project).unwrap();
     std::fs::write(
         sessions.join("cursor-selected.json"),
         format!(
