@@ -49,19 +49,24 @@ Canonical binary overrides are `WUT_<AGENT>_BIN`. If no `wut` config or sessions
 
 ## Efficiency targets
 
-Relative to inherited `ask` v0.2.1:
+Runtime speed is the primary optimization target; binary size is secondary. Changes must preserve the safety and persistence invariants above, avoid speculative dependencies or async machinery, and win a deterministic local benchmark before release.
 
-- fewer than 3,500 Rust source lines (baseline: 6,783)
-- no terminal UI dependency
-- no update/network subsystem
-- one subprocess/event loop instead of duplicated loops
-- release binary no larger than the 721,648-byte baseline
-- all behavior and safety invariants covered by deterministic tests
+The session index intentionally deserializes metadata and turn counts without retaining transcript bodies. Listing sessions and choosing a continuation therefore scale with JSON scanning rather than transcript allocation; only the selected session is fully deserialized and validated before provider launch.
 
-Verified on Linux with the release profile:
+Verified on Linux with randomized execution order, isolated state, and deterministic fake Cursor providers. Values are median process runtimes; the session fixture contains 200 sessions and 20.7 MB of transcripts.
 
-| Metric | Inherited baseline | `wut` 0.1.0 | Reduction |
+| Local path | Pre-optimization | Runtime-first build | Change |
 | --- | ---: | ---: | ---: |
-| Rust source lines | 6,783 | 2,329 | 65.7% |
-| Release binary | 721,648 bytes | 537,136 bytes | 25.6% |
+| `--help` (500 samples) | 2.714 ms | 2.722 ms | tied (0.3% slower) |
+| One-event durable turn (500 samples) | 18.769 ms | 18.797 ms | tied (0.2% slower) |
+| 20,000-event streamed turn (50 samples) | 41.536 ms | 37.283 ms | 10.2% faster |
+| `sessions --json` (80 samples) | 25.771 ms | 7.319 ms | 71.6% faster |
+| Continue latest session (60 samples) | 52.281 ms | 26.304 ms | 49.7% faster |
+
+Static footprint remains below inherited `ask` v0.2.1 even though the release profile now uses `opt-level = 3`:
+
+| Metric | Inherited `ask` | Runtime-first `wut` | Reduction |
+| --- | ---: | ---: | ---: |
+| Rust source lines | 6,783 | 2,510 | 63.0% |
+| Release binary | 721,648 bytes | 671,800 bytes | 6.9% |
 | Cargo dependency nodes | 34 | 17 | 50.0% |
