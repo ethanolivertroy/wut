@@ -3,7 +3,7 @@
 A fast question router for the coding agents already on your machine. Read-only on purpose.
 
 ```console
-$ wut -a cursor why is this service restarting
+$ wut why is this service restarting
 Check the container's last exit status and memory limit:
 
   docker inspect -f '{{.State.ExitCode}} {{.HostConfig.Memory}}' SERVICE
@@ -26,10 +26,15 @@ The repository is currently private and source-first:
 
 ```sh
 git clone git@github.com:ethanolivertroy/wut.git
-cargo install --path wut --locked
+cd wut
+./install.sh
 ```
 
-Requires Rust 1.88 or newer and at least one supported agent CLI that is already installed and authenticated.
+The installer runs `cargo install --locked` and, when zsh is your login shell, manages a small
+shell integration so punctuation such as a trailing `?` reaches `wut` literally. It backs up an
+existing `.zshrc` once and adds one idempotent source block; no manually maintained alias is needed.
+
+Requires Rust 1.88 or newer and at least one supported agent CLI that is already installed and authenticated. A binary-only `cargo install --path wut --locked` remains supported, but cannot change zsh expansion rules.
 
 ## Usage
 
@@ -55,9 +60,21 @@ wut --agent codex --reasoning low 'where is auth initialized?'
 
 Answers go to stdout. Prompts and errors go to stderr, so one-shot output is safe to pipe.
 
+Multi-word questions do not need quotes. The managed zsh integration installed by `./install.sh`
+disables filename generation only for `wut`, so this works unchanged:
+
+```sh
+wut what is kubernetes?
+```
+
+Options belong before the first question word. Once the question starts, dash-prefixed words such
+as `-O2` are prompt text. Use `--` only when the question itself starts with a dash. Other shell
+metacharacters retain their normal zsh behavior.
+
 ## Configuration
 
 `wut` uses `$WUT_CONFIG`, then `$XDG_CONFIG_HOME/wut/config.json`, then `~/.config/wut/config.json`.
+With no config, it uses Cursor through the unambiguous `cursor-agent` executable.
 
 ```sh
 wut config set agent cursor
@@ -77,9 +94,9 @@ WUT_CURSOR_BIN=/path/to/cursor-agent wut 'question'
 WUT_GROK_BIN=/path/to/grok wut 'question'
 ```
 
-The same pattern works for `CODEX`, `CLAUDE`, `PI`, and `OPENCODE`. Legacy `ASK_*_BIN` variables are read for one compatibility release, but `WUT_*_BIN` wins.
-
-If no `wut` config or sessions exist, version-2 `ask` data is read as a one-way migration source. New writes always go under `wut` paths.
+The same pattern works for `CODEX`, `CLAUDE`, `PI`, and `OPENCODE`. `wut` reads only
+`WUT_*` configuration, state, and executable overrides. Existing `ask` files and variables
+cannot silently change which provider `wut` launches.
 
 ## Safety model
 

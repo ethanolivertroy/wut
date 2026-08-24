@@ -45,11 +45,6 @@ impl Config {
         if path.exists() {
             return load_path(&path);
         }
-        let legacy = store::legacy_config_path()?;
-        if legacy.exists() {
-            return load_path(&legacy)
-                .map_err(|error| error.context("could not import ask config"));
-        }
         Ok(Self::default())
     }
 
@@ -107,6 +102,15 @@ fn load_path(path: &PathBuf) -> Result<Config> {
 }
 
 fn from_value(value: &Value) -> Result<Config> {
+    let version = value
+        .get("version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::new("config is missing integer field 'version'"))?;
+    if version != 1 {
+        return Err(Error::new(format!(
+            "unsupported wut config version {version}"
+        )));
+    }
     let mut config = Config {
         agent: value
             .get("agent")
@@ -197,20 +201,37 @@ mod tests {
     }
 
     #[test]
-    fn imports_version_two_ask_config() {
+    fn loads_v01_wut_config_fixture() {
         let config = from_value(&json!({
+            "version": 1,
+            "agent": "codex",
+            "instructions": {"custom": "Use evidence."},
+            "agents": {
+                "codex": {"model": "gpt-5", "reasoning": "high"}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(config.agent, "codex");
+        assert_eq!(config.instructions.as_deref(), Some("Use evidence."));
+        assert_eq!(config.settings("codex").model.as_deref(), Some("gpt-5"));
+        assert_eq!(config.settings("codex").reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn rejects_foreign_config_versions() {
+        let error = from_value(&json!({
             "version": 2,
             "agent": "cursor",
             "instructions": "concise",
-            "agents": {"cursor": {"model": "grok-fast", "reasoning": null}}
+            "agents": {}
         }))
-        .unwrap();
-        assert_eq!(config.agent, "cursor");
-        assert_eq!(
-            config.settings("cursor").model.as_deref(),
-            Some("grok-fast")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported wut config version 2")
         );
-        assert_eq!(config.instructions.as_deref(), Some(DEFAULT_INSTRUCTIONS));
     }
 
     #[test]
