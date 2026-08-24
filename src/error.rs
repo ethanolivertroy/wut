@@ -1,47 +1,73 @@
-use std::fmt;
+use std::fmt::{self, Display};
+
+const ISSUE_URL: &str = "https://github.com/ethanolivertroy/wut/issues";
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Error {
     message: String,
-    hint: Option<String>,
+    help: String,
 }
 
 impl Error {
-    pub fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>, help: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            hint: None,
+            help: help.into(),
         }
     }
 
     pub fn usage(message: impl Into<String>) -> Self {
-        Self::new(message).hint("run 'wut --help' for usage")
+        Self::new(message, "run 'wut --help' for usage")
     }
 
-    pub fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+    pub fn terminal(action: &str, error: impl Display) -> Self {
+        Self::new(
+            format!("{action}: {error}"),
+            "restart wut in an interactive terminal and try again",
+        )
+    }
+
+    pub fn agent(command: &str, message: impl Into<String>) -> Self {
+        Self::new(
+            message,
+            format!("run '{command}' directly to fix it, then try again"),
+        )
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(
+            message,
+            format!("try again; if it keeps happening, report it at {ISSUE_URL}"),
+        )
+    }
+
+    pub fn context(mut self, context: impl Display) -> Self {
+        self.message = format!("{context}: {}", self.message);
         self
     }
 
-    pub fn context(self, context: impl AsRef<str>) -> Self {
-        Self {
-            message: format!("{}: {}", context.as_ref(), self.message),
-            hint: self.hint,
-        }
+    pub fn detail(mut self, detail: impl Display) -> Self {
+        self.message = format!("{}: {detail}", self.message);
+        self
+    }
+
+    pub fn print(&self) {
+        eprintln!("wut: {}", self.message);
+        eprintln!("     {}", self.help);
     }
 
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    pub fn hint_text(&self) -> Option<&str> {
-        self.hint.as_deref()
+    pub fn help(&self) -> &str {
+        &self.help
     }
 }
 
-impl fmt::Display for Error {
+impl Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
     }
@@ -49,14 +75,26 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<std::io::Error> for Error {
-    fn from(error: std::io::Error) -> Self {
-        Self::new(error.to_string())
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::Error;
 
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
-        Self::new(error.to_string())
+    #[test]
+    fn errors_reference_only_the_wut_product_identity() {
+        assert_eq!(
+            Error::usage("bad input").help(),
+            "run 'wut --help' for usage"
+        );
+        assert_eq!(
+            Error::terminal("read input", "failed").help(),
+            "restart wut in an interactive terminal and try again"
+        );
+        let internal = Error::internal("broken");
+        assert!(
+            internal
+                .help()
+                .contains("https://github.com/ethanolivertroy/wut/issues")
+        );
+        assert!(!internal.help().contains("benja/ask"));
     }
 }

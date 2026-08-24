@@ -1,28 +1,61 @@
-# wut
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/light-banner.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/dark-banner.png">
+    <img alt="wut" src="assets/dark-banner.png" width="320">
+  </picture>
+</div>
 
-A fast question router for the coding agents already on your machine. Read-only on purpose.
+<div align="center">
+  Ask a coding agent a question. Get an answer, not a takeover.
+</div>
+
+<br>
+
+## What it feels like
+
+Ask a question and get back to your shell:
 
 ```console
-$ wut why is this service restarting
-Check the container's last exit status and memory limit:
+$ wut how do i find TODO or FIXME comments in src
+Use ripgrep:
 
-  docker inspect -f '{{.State.ExitCode}} {{.HostConfig.Memory}}' SERVICE
-
-$ wut -c it exited 137
-Exit 137 means SIGKILL, most often an out-of-memory kill.
+  rg 'TODO|FIXME' src
 ```
 
-`wut` is not another agent. It gives Codex, Claude Code, Cursor, Grok, OpenCode, and Pi one stable interface for questions, streaming output, and resumable local history. The selected agent still owns authentication and its native conversation.
+Follow up in the same agent session:
+
+```console
+$ wut -c how do i exclude generated files
+Add an exclude:
+
+  rg 'TODO|FIXME' src -g '!generated/**'
+```
+
+Or run `wut` to start an interactive session:
+
+```console
+$ wut
+> why is this container restarting?
+
+Check the last termination reason:
+
+  kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].lastState}'
+
+> /settings
+```
+
+Every successful answer is saved. Use `wut -c` to continue the latest session in the current folder.
 
 ## Why
 
-Coding agents are useful even when you do not want them coding. `wut` constrains each CLI with its strongest native read-only mode, sends one question, prints the answer, records the native session ID, and gets out of the way.
+`wut` is a normal terminal command for asking AI questions through whichever coding agent or model you already use. There is no TUI to live inside: ask something, read the answer, and get your shell back.
 
-No custom TUI. No self-updater. No provider API keys. No background service.
+Coding agents can do a lot in the background, and sometimes that is exactly what you do not want. `wut` starts the selected provider with its native read-only or planning controls. You run commands and make changes yourself.
 
 ## Install
 
-The repository is currently private and source-first:
+This repository is private, so install from an authenticated checkout:
 
 ```sh
 git clone git@github.com:ethanolivertroy/wut.git
@@ -30,111 +63,67 @@ cd wut
 ./install.sh
 ```
 
-The installer runs `cargo install --locked` and, when zsh is your login shell, manages a small
-shell integration so punctuation such as a trailing `?` reaches `wut` literally. It backs up an
-existing `.zshrc` once and adds one idempotent source block; no manually maintained alias is needed.
+Running `./install.sh` from the checkout performs a locked release build, installs `wut` to `~/.local/bin/wut`, and configures managed zsh punctuation support when zsh is your login shell. Set `WUT_INSTALL_DIR` to change the binary destination.
 
-Requires Rust 1.88 or newer and at least one supported agent CLI that is already installed and authenticated. A binary-only `cargo install --path wut --locked` remains supported, but cannot change zsh expansion rules.
+The zsh integration is installer-owned and idempotent. It lets literal questions such as `wut what is kubernetes?` reach the executable without disabling zsh `NOMATCH` globally. You do not need to maintain an alias yourself.
+
+Tagged releases use checksum-verified archives for Intel/ARM Macs and x86_64/ARM64 Linux.
 
 ## Usage
 
 ```text
-wut [OPTIONS] [QUESTION...]                  ask once
-wut                                           start a plain session
-wut -c [QUESTION...]                         continue the latest session here
-wut --session ID [QUESTION...]               continue a specific wut session
-wut agents [--json]                          inspect installed agents
-wut models [AGENT]                           ask an agent for its model list
-wut sessions [--json]                        list resumable sessions
-wut config [show [--json] | path]            inspect configuration
-wut config set KEY VALUE                     change a default
+wut [QUESTION...]          ask once
+wut                        start a session
+wut -c [QUESTION...]       continue the latest session here
+wut --sessions             reopen a saved session
+wut --settings             set defaults for new sessions
+wut --upgrade              update wut from a tagged release
+wut -V                     print the version
 ```
 
-Per-request overrides:
+Use `wut -- -why did this fail` when the question itself begins with a dash. After the first question word, dash-prefixed terms are treated as question text, so `wut compare -O2 and -O3` works normally.
 
-```sh
-wut --agent cursor --model MODEL_ID 'explain this crate'
-wut --agent grok --reasoning high 'review this architecture'
-wut --agent codex --reasoning low 'where is auth initialized?'
-```
+## Updates
 
-Answers go to stdout. Prompts and errors go to stderr, so one-shot output is safe to pipe.
+`wut` checks for updates at most once a day in a detached helper process. A newly discovered tagged release is announced after a later successful run, without holding the current command open. Set `WUT_NO_UPDATE_CHECK=1` to disable the check. Updates happen only when you run `wut --upgrade`.
 
-Multi-word questions do not need quotes. The managed zsh integration installed by `./install.sh`
-disables filename generation only for `wut`, so this works unchanged:
+Because this repository is private, release discovery and downloads prefer an authenticated GitHub CLI (`gh auth status`). The public curl/wget path remains available if repository visibility changes.
 
-```sh
-wut what is kubernetes?
-```
+## Agents
 
-Options belong before the first question word. Once the question starts, dash-prefixed words such
-as `-O2` are prompt text. Use `--` only when the question itself starts with a dash. Other shell
-metacharacters retain their normal zsh behavior.
+Under the hood, `wut` runs a coding-agent CLI already installed and authenticated on your machine. Fresh installs default to Codex with the `fast` model alias, which prefers GPT-5.3 Codex Spark when available. Run `wut --settings` to choose another default agent, model, reasoning level, or answer style.
 
-## Configuration
+| Agent | Command | Read-only control | Continuation |
+|---|---|---|---|
+| Cursor | `cursor-agent` (falls back to `agent`) | Ask mode (`--mode ask`) | Saved chat IDs |
+| Codex | `codex app-server` | Read-only sandbox | Saved thread IDs |
+| Claude Code | `claude` | Plan permission mode | Saved session IDs |
+| Pi | `pi` | Read-only tools (`read,grep,find,ls`) | Saved session IDs |
+| OpenCode | `opencode` | Generated deny-by-default permissions | Saved session IDs |
+| Grok | `grok` | Plan permission mode | Saved session IDs |
 
-`wut` uses `$WUT_CONFIG`, then `$XDG_CONFIG_HOME/wut/config.json`, then `~/.config/wut/config.json`.
-With no config, it uses Cursor through the unambiguous `cursor-agent` executable.
+OpenCode's policy is a mutation boundary, not a complete confidentiality boundary: workspace reads required to answer questions remain available.
 
-```sh
-wut config set agent cursor
-wut config set cursor.model MODEL_ID
-wut config set grok.reasoning high
-wut config set instructions concise
-wut config set instructions none
-wut config show --json
-```
+Canonical executable overrides are `WUT_CURSOR_BIN`, `WUT_CODEX_BIN`, `WUT_CLAUDE_BIN`, `WUT_PI_BIN`, `WUT_OPENCODE_BIN`, and `WUT_GROK_BIN`.
 
-Use `default` or `none` to clear a model or reasoning override. Quote custom instructions containing spaces.
+## State and migration
 
-Agent executable overrides are explicit and vendor-specific:
+Canonical locations follow XDG conventions:
 
-```sh
-WUT_CURSOR_BIN=/path/to/cursor-agent wut 'question'
-WUT_GROK_BIN=/path/to/grok wut 'question'
-```
+- config: `${XDG_CONFIG_HOME:-$HOME/.config}/wut/config.json`
+- sessions: `${XDG_STATE_HOME:-$HOME/.local/state}/wut/sessions/`
+- update cache: `${XDG_CACHE_HOME:-$HOME/.cache}/wut/update.json`
 
-The same pattern works for `CODEX`, `CLAUDE`, `PI`, and `OPENCODE`. `wut` reads only
-`WUT_*` configuration, state, and executable overrides. Existing `ask` files and variables
-cannot silently change which provider `wut` launches.
+`WUT_CONFIG` overrides the config file. `WUT_STATE_DIR` overrides the state root; sessions are stored in its `sessions/` child for compatibility with wut v0.1/v0.2. New directories are private (`0700`) and new files are private (`0600`). Writes are atomic.
 
-## Safety model
+On first use, existing state from the authorized predecessor is imported into canonical `wut` paths without deleting or modifying the source files. Existing `wut` v0.1/v0.2 config and session schemas remain readable. Canonical `WUT_*` settings always win over legacy compatibility aliases.
 
-| Agent | Default binary | Enforced mode |
-| --- | --- | --- |
-| Cursor | `cursor-agent` | `--mode ask` |
-| Grok | `grok` | `--permission-mode plan` |
-| Codex | `codex` | `--sandbox read-only` |
-| Claude Code | `claude` | `--permission-mode plan` |
-| Pi | `pi` | only `read,grep,find,ls` |
-| OpenCode | `opencode` | deny by default; workspace reads/discovery only; external directories denied |
+Failed provider turns do not create or update sessions. Session listings show local metadata, not provider-native continuation IDs or transcript contents.
 
-`wut` never installs or authenticates an agent. Read-only is a **mutation boundary**, not a confidentiality boundary: any provider CLI may read and transmit workspace files to its configured remote model. OpenCode also denies external-directory access and `.env` reads, but no filename policy can identify every secret. Do not run an agent in a workspace containing data that provider must not receive.
+## Origins
 
-Sessions are private JSON files under `$WUT_STATE_DIR/sessions`, `$XDG_STATE_HOME/wut/sessions`, or `~/.local/state/wut/sessions`. Directories are mode `0700`; files are mode `0600` and replaced atomically.
+This implementation is derived from code by Benjamin Akar with permission. The authorized import was pinned to source commit `3d1cd5d90603586aeba9ba47612d0c0625a04d3a`; development and releases target the private `ethanolivertroy/wut` repository. The original MIT copyright notice is preserved in [LICENSE](LICENSE).
 
-## Architecture
+## License
 
-The implementation is intentionally boring:
-
-- manual typed CLI parser
-- static agent registry
-- small command builders
-- one subprocess and JSONL decoder loop
-- serde-backed config and session files
-- standard input/output interactive mode
-
-See [DESIGN.md](DESIGN.md) for the behavior contract and efficiency targets.
-
-## Development
-
-```sh
-cargo fmt --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo build --release --locked
-```
-
-## License and provenance
-
-MIT licensed. `wut` began as a clean architectural rewrite of Benjamin Akar's MIT-licensed [`ask`](https://github.com/benja/ask); the original copyright notice remains in [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
