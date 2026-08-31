@@ -53,8 +53,8 @@ contains '$ wut' README.md
 contains 'WUT_INSTALL_DIR' README.md
 contains 'Benjamin Akar' README.md
 contains '3d1cd5d90603586aeba9ba47612d0c0625a04d3a' README.md
-contains 'Copyright (c) 2026 Benjamin Akar' LICENSE
 contains 'Copyright (c) 2026 Ethan Troy' LICENSE
+rejects 'Copyright (c) 2026 Benjamin Akar' LICENSE
 contains '      - ".github/workflows/**"' .github/workflows/ci.yml
 contains 'shellcheck install.sh tests/install.sh tests/rebrand.sh' .github/workflows/ci.yml
 

@@ -122,7 +122,7 @@ Failed provider turns do not create or update sessions. Session listings show lo
 
 ## Origins
 
-This implementation is derived from code by Benjamin Akar with permission. The authorized import was pinned to source commit `3d1cd5d90603586aeba9ba47612d0c0625a04d3a`; development and releases target the private `ethanolivertroy/wut` repository. The original MIT copyright notice is preserved in [LICENSE](LICENSE).
+wut was inspired by work from Benjamin Akar, used with permission (import pinned to source commit `3d1cd5d90603586aeba9ba47612d0c0625a04d3a`). It is now an independent project, developed and maintained in the `ethanolivertroy/wut` repository.
 
 ## License
 
