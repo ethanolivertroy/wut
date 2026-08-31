@@ -182,17 +182,45 @@ fn delete_from(directory: &Path, session: &Session) -> Result<()> {
 }
 
 pub fn latest(cwd: &Path) -> Result<Session> {
-    let cwd = cwd.to_string_lossy();
-    load_all()?
-        .into_iter()
-        .filter(|session| session.cwd == cwd)
-        .max_by_key(|session| session.updated_at)
-        .ok_or_else(|| {
-            Error::new(
-                "no saved sessions for this folder",
-                "start one by running 'wut'",
-            )
-        })
+    let (directory, legacy) = directories()?;
+    migrate_legacy(&directory, legacy.as_deref())?;
+    latest_from(&directory, &cwd.to_string_lossy())?.ok_or_else(|| {
+        Error::new(
+            "no saved sessions for this folder",
+            "start one by running 'wut'",
+        )
+    })
+}
+
+fn latest_from(directory: &Path, cwd: &str) -> Result<Option<Session>> {
+    if !directory.exists() {
+        return Ok(None);
+    }
+
+    // Sessions are rewritten atomically on every save, so modification time
+    // follows updated_at; walking files newest-first finds the latest match
+    // without parsing every saved session.
+    let mut candidates = Vec::new();
+    for entry in session_entries(directory)? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        candidates.push((modified, path));
+    }
+    candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+
+    for (_, path) in candidates {
+        let session = load_session(&path)?;
+        if session.cwd == cwd {
+            return Ok(Some(session));
+        }
+    }
+    Ok(None)
 }
 
 pub fn load_all() -> Result<Vec<Session>> {
@@ -207,6 +235,18 @@ fn load_from(directory: &Path) -> Result<Vec<Session>> {
     }
 
     let mut sessions = Vec::new();
+    for entry in session_entries(directory)? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        sessions.push(load_session(&path)?);
+    }
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    Ok(sessions)
+}
+
+fn session_entries(directory: &Path) -> Result<Vec<fs::DirEntry>> {
     let entries = fs::read_dir(directory).map_err(|error| {
         Error::new(
             format!(
@@ -216,37 +256,33 @@ fn load_from(directory: &Path) -> Result<Vec<Session>> {
             "check its permissions and try again",
         )
     })?;
-    for entry in entries {
-        let path = entry
-            .map_err(|error| {
+    entries
+        .map(|entry| {
+            entry.map_err(|error| {
                 Error::new(
                     format!("could not read a session entry: {error}"),
                     "check the session directory permissions and try again",
                 )
-            })?
-            .path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|error| {
-            Error::new(
-                format!("could not read '{}': {error}", path.display()),
-                "check its permissions and try again",
-            )
-        })?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            Error::new(
-                format!("could not parse '{}': {error}", path.display()),
-                "remove this file and try again",
-            )
-        })?;
-        sessions.push(
-            Session::from_json(&value)
-                .map_err(|error| error.context(format!("invalid session '{}'", path.display())))?,
-        );
-    }
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    Ok(sessions)
+            })
+        })
+        .collect()
+}
+
+fn load_session(path: &Path) -> Result<Session> {
+    let bytes = fs::read(path).map_err(|error| {
+        Error::new(
+            format!("could not read '{}': {error}", path.display()),
+            "check its permissions and try again",
+        )
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Error::new(
+            format!("could not parse '{}': {error}", path.display()),
+            "remove this file and try again",
+        )
+    })?;
+    Session::from_json(&value)
+        .map_err(|error| error.context(format!("invalid session '{}'", path.display())))
 }
 
 fn load_legacy_from(directory: &Path) -> Result<Vec<Session>> {
@@ -359,11 +395,13 @@ fn invalid_session(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{
-        Session, SessionSettings, Turn, delete_from, file_key, import_session, load_from,
-        migrate_legacy, save_to,
+        Session, SessionSettings, Turn, delete_from, file_key, import_session, latest_from,
+        load_from, migrate_legacy, save_to,
     };
 
     #[test]
@@ -478,6 +516,65 @@ mod tests {
 
         assert!(!deleted_path.exists());
         assert!(kept_path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn latest_prefers_the_newest_matching_session_without_older_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("wut-latest-test-{}-{unique}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let cwd_a = Path::new("/tmp/wut-project-a");
+        let cwd_b = Path::new("/tmp/wut-project-b");
+
+        // Oldest file is malformed: the lazy walk must find newer matches
+        // before ever reading it.
+        fs::write(directory.join("malformed.json"), b"not-json").unwrap();
+        thread::sleep(Duration::from_millis(20));
+        save_to(&directory, &Session::new("codex", "a-old".into(), cwd_a)).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        save_to(&directory, &Session::new("codex", "b-only".into(), cwd_b)).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        save_to(&directory, &Session::new("codex", "a-new".into(), cwd_a)).unwrap();
+
+        let found_a = latest_from(&directory, &cwd_a.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_a.harness_session_id, "a-new");
+
+        let found_b = latest_from(&directory, &cwd_b.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_b.harness_session_id, "b-only");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn latest_without_matching_sessions_is_none() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "wut-latest-none-test-{}-{unique}",
+            std::process::id()
+        ));
+
+        assert_eq!(latest_from(&directory, "/tmp/missing").unwrap(), None);
+
+        fs::create_dir(&directory).unwrap();
+        save_to(
+            &directory,
+            &Session::new("codex", "other".into(), Path::new("/tmp/wut-other")),
+        )
+        .unwrap();
+        assert_eq!(latest_from(&directory, "/tmp/missing").unwrap(), None);
+
         fs::remove_dir_all(directory).unwrap();
     }
 

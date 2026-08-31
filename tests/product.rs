@@ -4,16 +4,27 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// Each fixture writes fake agent scripts that wut then executes. Running
+// fixtures on parallel test threads races those script writes against
+// fork/exec in sibling tests, which intermittently breaks the spawned
+// agents (ETXTBSY on Linux, transient early exits elsewhere). Holding a
+// process-wide lock for the fixture's lifetime keeps every subprocess
+// test serial; the whole suite still finishes in well under a second.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     root: PathBuf,
     cursor: PathBuf,
     codex: PathBuf,
+    _serial: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -27,6 +38,7 @@ impl Fixture {
             root,
             cursor,
             codex,
+            _serial: serial,
         }
     }
 
