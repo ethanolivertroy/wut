@@ -246,6 +246,20 @@ pub static DEFINITIONS: &[Definition] = &[
         create: |program| Box::new(claude::Claude::new(program)),
     },
     Definition {
+        id: "cerebras",
+        aliases: &[],
+        name: "Cerebras",
+        description: "Cerebras Inference through OpenCode",
+        default_model: Some("cerebras/gpt-oss-120b"),
+        default_reasoning: Some("medium"),
+        reasoning: ReasoningControl::Selectable,
+        program_env: "WUT_CEREBRAS_BIN",
+        legacy_program_env: "ASK_CEREBRAS_BIN",
+        default_program: "opencode",
+        fallback_program: None,
+        create: |program| Box::new(opencode::OpenCode::cerebras(program)),
+    },
+    Definition {
         id: "opencode",
         aliases: &["open-code"],
         name: "OpenCode",
@@ -439,6 +453,13 @@ mod tests {
     fn registry_resolves_ids_and_aliases() {
         assert_eq!(resolve("codex").unwrap().id, "codex");
         assert_eq!(resolve("claude-code").unwrap().id, "claude");
+        assert_eq!(resolve("cerebras").unwrap().id, "cerebras");
+        assert_eq!(
+            resolve("cerebras").unwrap().default_model,
+            Some("cerebras/gpt-oss-120b")
+        );
+        assert_eq!(resolve("cerebras").unwrap().default_program, "opencode");
+        assert_eq!(resolve("cerebras").unwrap().program_env, "WUT_CEREBRAS_BIN");
         assert_eq!(resolve("open-code").unwrap().id, "opencode");
         assert_eq!(resolve("cursor").unwrap().id, "cursor");
         assert_eq!(resolve("cursor").unwrap().default_program, "cursor-agent");

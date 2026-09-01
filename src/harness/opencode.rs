@@ -4,18 +4,36 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value, json};
 
-use super::{Harness, Model, Response, RunOptions, bounded_output, capture_stderr};
+use super::{Harness, Model, ReasoningLevel, Response, RunOptions, bounded_output, capture_stderr};
 use crate::error::{Error, Result};
 
 const AGENT_ID: &str = "wut-read-only";
+const CEREBRAS_PROVIDER_ID: &str = "cerebras";
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Profile {
+    General,
+    Cerebras,
+}
 
 pub(super) struct OpenCode {
     program: OsString,
+    profile: Profile,
 }
 
 impl OpenCode {
     pub(super) fn new(program: OsString) -> Self {
-        Self { program }
+        Self {
+            program,
+            profile: Profile::General,
+        }
+    }
+
+    pub(super) fn cerebras(program: OsString) -> Self {
+        Self {
+            program,
+            profile: Profile::Cerebras,
+        }
     }
 
     fn command(
@@ -35,7 +53,7 @@ impl OpenCode {
         options: &RunOptions<'_>,
         existing: Option<&str>,
     ) -> Result<Command> {
-        let config = inline_config(existing, options.instructions)?;
+        let config = inline_config(existing, options.instructions, self.profile)?;
         let mut command = Command::new(&self.program);
         command
             .args(["--pure", "run", "--agent", AGENT_ID, "--format", "json"])
@@ -48,6 +66,11 @@ impl OpenCode {
         if let Some(model) = options.model {
             command.args(["--model", model]);
         }
+        if self.profile == Profile::Cerebras
+            && let Some(reasoning) = options.reasoning
+        {
+            command.args(["--variant", reasoning]);
+        }
         command.arg("--").arg(question);
         Ok(command)
     }
@@ -55,6 +78,10 @@ impl OpenCode {
 
 impl Harness for OpenCode {
     fn models(&mut self) -> Result<Vec<Model>> {
+        if self.profile == Profile::Cerebras {
+            return Ok(cerebras_models());
+        }
+
         let mut command = Command::new(&self.program);
         command.args(["--pure", "models"]);
         let output = bounded_output(&mut command).map_err(start_error)?;
@@ -123,7 +150,11 @@ impl Harness for OpenCode {
     }
 }
 
-fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<String> {
+fn inline_config(
+    existing: Option<&str>,
+    instructions: Option<&str>,
+    profile: Profile,
+) -> Result<String> {
     let mut config = match existing {
         Some(existing) => serde_json::from_str::<Value>(existing)
             .map_err(|error| {
@@ -142,6 +173,20 @@ fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<S
             })?,
         None => Map::new(),
     };
+    if profile == Profile::Cerebras {
+        let providers = config
+            .entry("provider")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                Error::new(
+                    "OPENCODE_CONFIG_CONTENT has an invalid 'provider' value",
+                    "fix or unset OPENCODE_CONFIG_CONTENT, then try again",
+                )
+            })?;
+        providers.insert(CEREBRAS_PROVIDER_ID.into(), cerebras_provider());
+    }
+
     let mut agent = json!({
         "description": "Read-only questions through wut",
         "mode": "primary",
@@ -179,6 +224,69 @@ fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<S
     config.insert("share".into(), Value::String("disabled".into()));
     serde_json::to_string(&config)
         .map_err(|error| Error::internal(format!("could not configure OpenCode: {error}")))
+}
+
+fn cerebras_provider() -> Value {
+    json!({
+        "npm": "@ai-sdk/cerebras",
+        "name": "Cerebras",
+        "options": {
+            "baseURL": "https://api.cerebras.ai/v1"
+        },
+        "models": {
+            "gpt-oss-120b": {
+                "name": "GPT OSS 120B",
+                "variants": {
+                    "low": {"reasoningEffort": "low"},
+                    "medium": {"reasoningEffort": "medium"},
+                    "high": {"reasoningEffort": "high"}
+                }
+            },
+            "gemma-4-31b": {
+                "name": "Gemma 4 31B",
+                "variants": {
+                    "none": {"reasoningEffort": "none"},
+                    "low": {"reasoningEffort": "low"},
+                    "medium": {"reasoningEffort": "medium"},
+                    "high": {"reasoningEffort": "high"}
+                }
+            }
+        }
+    })
+}
+
+fn cerebras_models() -> Vec<Model> {
+    let level = |id: &str, description: &str| ReasoningLevel {
+        id: id.to_owned(),
+        description: description.to_owned(),
+    };
+    vec![
+        Model {
+            id: "cerebras/gpt-oss-120b".into(),
+            name: "GPT OSS 120B".into(),
+            description: "Cerebras public endpoint".into(),
+            is_default: true,
+            reasoning: vec![
+                level("low", "Low reasoning"),
+                level("medium", "Balanced reasoning"),
+                level("high", "Deep reasoning"),
+            ],
+            default_reasoning: Some("medium".into()),
+        },
+        Model {
+            id: "cerebras/gemma-4-31b".into(),
+            name: "Gemma 4 31B".into(),
+            description: "Cerebras public endpoint · vision capable".into(),
+            is_default: false,
+            reasoning: vec![
+                level("none", "No reasoning"),
+                level("low", "Reasoning enabled"),
+                level("medium", "Reasoning enabled"),
+                level("high", "Reasoning enabled"),
+            ],
+            default_reasoning: Some("none".into()),
+        },
+    ]
 }
 
 fn parse_models(output: &str) -> Result<Vec<Model>> {
@@ -316,12 +424,12 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{OpenCode, inline_config, parse_models, read_events};
+    use super::{OpenCode, Profile, cerebras_models, inline_config, parse_models, read_events};
     use crate::harness::RunOptions;
 
     #[test]
     fn configures_a_private_read_only_agent() {
-        let config = inline_config(None, Some("Be concise.")).unwrap();
+        let config = inline_config(None, Some("Be concise."), Profile::General).unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
         let agent = &config["agent"]["wut-read-only"];
 
@@ -334,8 +442,12 @@ mod tests {
 
     #[test]
     fn preserves_existing_inline_config() {
-        let config =
-            inline_config(Some(r#"{"provider":{"local":{"name":"Local"}}}"#), None).unwrap();
+        let config = inline_config(
+            Some(r#"{"provider":{"local":{"name":"Local"}}}"#),
+            None,
+            Profile::General,
+        )
+        .unwrap();
         let config: Value = serde_json::from_str(&config).unwrap();
 
         assert_eq!(config["provider"]["local"]["name"], "Local");
@@ -343,9 +455,53 @@ mod tests {
     }
 
     #[test]
+    fn cerebras_profile_defines_the_official_provider_without_copying_the_key() {
+        let config = inline_config(None, None, Profile::Cerebras).unwrap();
+        let config: Value = serde_json::from_str(&config).unwrap();
+        let provider = &config["provider"]["cerebras"];
+
+        assert_eq!(provider["npm"], "@ai-sdk/cerebras");
+        assert_eq!(provider["options"]["baseURL"], "https://api.cerebras.ai/v1");
+        assert!(provider["options"].get("apiKey").is_none());
+        assert_eq!(
+            provider["models"]["gpt-oss-120b"]["variants"]["high"]["reasoningEffort"],
+            "high"
+        );
+        assert_eq!(
+            provider["models"]["gemma-4-31b"]["variants"]["none"]["reasoningEffort"],
+            "none"
+        );
+    }
+
+    #[test]
+    fn cerebras_catalog_matches_the_public_models_and_reasoning_controls() {
+        let models = cerebras_models();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cerebras/gpt-oss-120b", "cerebras/gemma-4-31b"]
+        );
+        assert!(models[0].is_default);
+        assert_eq!(models[0].default_reasoning.as_deref(), Some("medium"));
+        assert_eq!(
+            models[0]
+                .reasoning
+                .iter()
+                .map(|level| level.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high"]
+        );
+        assert_eq!(models[1].default_reasoning.as_deref(), Some("none"));
+    }
+
+    #[test]
     fn builds_a_session_command() {
         let harness = OpenCode {
             program: "opencode".into(),
+            profile: Profile::General,
         };
         let command = harness
             .command_with_config(
@@ -388,6 +544,7 @@ mod tests {
     fn dash_prefixed_question_follows_option_terminator() {
         let harness = OpenCode {
             program: "opencode".into(),
+            profile: Profile::General,
         };
         let command = harness
             .command_with_config(

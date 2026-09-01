@@ -64,6 +64,35 @@ impl Fixture {
         );
     }
 
+    fn configure_cerebras(&self) {
+        write(
+            self.root.join("config/wut/config.json"),
+            r#"{
+  "version": 2,
+  "agent": "cerebras",
+  "instructions": "concise",
+  "agents": {"cerebras": {"model": "cerebras/gpt-oss-120b", "reasoning": "medium"}}
+}"#,
+        );
+    }
+
+    fn write_opencode(&self) {
+        let opencode = self.root.join("opencode");
+        fs::write(
+            &opencode,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$WUT_TEST_ARGS"
+printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$WUT_TEST_CONFIG"
+printf '%s\n' '{"type":"step_start","sessionID":"cerebras-session-1","part":{}}'
+printf '%s\n' '{"type":"text","sessionID":"cerebras-session-1","part":{"text":"fast answer"}}'
+printf '%s\n' '{"type":"step_finish","sessionID":"cerebras-session-1","part":{}}'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(opencode, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     fn write_gh_release(&self, tag: &str) {
         let gh = self.root.join("gh");
         fs::write(
@@ -170,6 +199,25 @@ fn write(path: impl AsRef<Path>, contents: &str) {
     let path = path.as_ref();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
+}
+
+fn assert_tree_excludes(path: &Path, needle: &str) {
+    if !path.exists() {
+        return;
+    }
+    for entry in fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            assert_tree_excludes(&path, needle);
+        } else {
+            assert!(
+                !String::from_utf8_lossy(&fs::read(&path).unwrap()).contains(needle),
+                "{} contains sensitive test data",
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -316,6 +364,104 @@ fn fresh_run_uses_codex_spark_and_private_canonical_state() {
         sessions[0].metadata().unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn cerebras_runs_through_opencode_with_a_read_only_scoped_provider() {
+    let fixture = Fixture::new();
+    fixture.configure_cerebras();
+    fixture.write_opencode();
+    let args_path = fixture.root.join("provider-args");
+    let config_path = fixture.root.join("provider-config");
+    let output = fixture
+        .command()
+        .env("CEREBRAS_API_KEY", "test-secret-never-serialize")
+        .env("WUT_TEST_ARGS", &args_path)
+        .env("WUT_TEST_CONFIG", &config_path)
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "fast answer\n");
+    assert_eq!(
+        fs::read_to_string(&args_path)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "--pure",
+            "run",
+            "--agent",
+            "wut-read-only",
+            "--format",
+            "json",
+            "--model",
+            "cerebras/gpt-oss-120b",
+            "--variant",
+            "medium",
+            "--",
+            "what is this?",
+        ]
+    );
+
+    let config_text = fs::read_to_string(&config_path).unwrap();
+    assert!(!config_text.contains("test-secret-never-serialize"));
+    let config: serde_json::Value = serde_json::from_str(&config_text).unwrap();
+    assert_eq!(config["share"], "disabled");
+    assert_eq!(config["agent"]["wut-read-only"]["permission"]["*"], "deny");
+    assert_eq!(config["provider"]["cerebras"]["npm"], "@ai-sdk/cerebras");
+    assert_eq!(
+        config["provider"]["cerebras"]["options"]["baseURL"],
+        "https://api.cerebras.ai/v1"
+    );
+
+    let follow_up = fixture
+        .command()
+        .env("CEREBRAS_API_KEY", "test-secret-never-serialize")
+        .env("WUT_TEST_ARGS", &args_path)
+        .env("WUT_TEST_CONFIG", &config_path)
+        .args(["-c", "one", "more", "thing"])
+        .output()
+        .unwrap();
+    assert!(
+        follow_up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&follow_up.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&args_path)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "--pure",
+            "run",
+            "--agent",
+            "wut-read-only",
+            "--format",
+            "json",
+            "--session",
+            "cerebras-session-1",
+            "--model",
+            "cerebras/gpt-oss-120b",
+            "--variant",
+            "medium",
+            "--",
+            "one more thing",
+        ]
+    );
+    assert_eq!(
+        fs::read_dir(fixture.root.join("state/wut/sessions"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_tree_excludes(&fixture.root, "test-secret-never-serialize");
 }
 
 #[test]

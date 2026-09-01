@@ -97,6 +97,7 @@ Under the hood, `wut` runs a coding-agent CLI already installed and authenticate
 |---|---|---|---|
 | Cursor | `cursor-agent` (falls back to `agent`) | Ask mode (`--mode ask`) | Saved chat IDs |
 | Codex | `codex app-server` | Read-only sandbox | Saved thread IDs |
+| Cerebras | `opencode` + `@ai-sdk/cerebras` | Generated deny-by-default permissions | Saved OpenCode session IDs |
 | Claude Code | `claude` | Plan permission mode | Saved session IDs |
 | Pi | `pi` | Read-only tools (`read,grep,find,ls`) | Saved session IDs |
 | OpenCode | `opencode` | Generated deny-by-default permissions | Saved session IDs |
@@ -104,7 +105,20 @@ Under the hood, `wut` runs a coding-agent CLI already installed and authenticate
 
 OpenCode's policy is a mutation boundary, not a complete confidentiality boundary: workspace reads required to answer questions remain available.
 
-Canonical executable overrides are `WUT_CURSOR_BIN`, `WUT_CODEX_BIN`, `WUT_CLAUDE_BIN`, `WUT_PI_BIN`, `WUT_OPENCODE_BIN`, and `WUT_GROK_BIN`.
+### Cerebras
+
+Cerebras is a first-class agent choice backed by OpenCode, so it keeps wut's project-aware read-only tools and session continuation. wut injects the official `@ai-sdk/cerebras` provider at runtime, pins the API base URL to `https://api.cerebras.ai/v1`, and never copies the API key into its config or session files.
+
+Install OpenCode, set the key in the environment that launches wut, then choose **Cerebras** in `wut --settings`:
+
+```sh
+export CEREBRAS_API_KEY="your-api-key-here"
+wut --settings
+```
+
+The default is `gpt-oss-120b` with medium reasoning. `gemma-4-31b` and the reasoning levels supported by each public model are available in the same settings screen. The model catalog is sourced from the [Cerebras public model documentation](https://inference-docs.cerebras.ai/models/overview).
+
+Canonical executable overrides are `WUT_CURSOR_BIN`, `WUT_CODEX_BIN`, `WUT_CEREBRAS_BIN`, `WUT_CLAUDE_BIN`, `WUT_PI_BIN`, `WUT_OPENCODE_BIN`, and `WUT_GROK_BIN`.
 
 ## State and migration
 

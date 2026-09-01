@@ -305,6 +305,8 @@ mod tests {
         assert_eq!(config.reasoning("cursor"), None);
         assert_eq!(config.model("codex"), Some("fast"));
         assert_eq!(config.reasoning("codex"), Some("low"));
+        assert_eq!(config.model("cerebras"), Some("cerebras/gpt-oss-120b"));
+        assert_eq!(config.reasoning("cerebras"), Some("medium"));
         assert_eq!(config.instructions(), &Instructions::Concise);
     }
 
