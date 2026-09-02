@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod cursor;
+mod fast_model;
 mod grok;
 mod opencode;
 mod pi;

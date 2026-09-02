@@ -1,18 +1,15 @@
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use super::fast_model;
 use super::{Harness, Model, ReasoningLevel, Response, RunOptions};
 use crate::error::{Error, Result};
-use crate::storage;
 
 const FAST_MODELS: &[&str] = &["gpt-5.3-codex-spark", "gpt-5.6-luna"];
-const FAST_MODEL_CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const FAST_MODEL_CACHE: fast_model::Cache = fast_model::Cache::new("codex");
 
 pub(super) struct Codex {
     program: OsString,
@@ -161,9 +158,7 @@ impl AppServer {
             Err(failure) if failure.request_rejected && fast && self.fast_model_from_disk => {
                 // The cached fast model may have been retired since it was
                 // resolved; re-resolve once and retry before surfacing errors.
-                if let Some(path) = fast_model_cache_path() {
-                    invalidate_cached_fast_model(&path);
-                }
+                FAST_MODEL_CACHE.invalidate();
                 self.resolved_fast_model = None;
                 self.fast_model_from_disk = false;
                 let model = self.resolve_fast_model()?;
@@ -269,9 +264,7 @@ impl AppServer {
         if let Some(model) = &self.resolved_fast_model {
             return Ok(model.clone());
         }
-        if let Some(path) = fast_model_cache_path()
-            && let Some(model) = read_cached_fast_model(&path, now())
-        {
+        if let Some(model) = FAST_MODEL_CACHE.read() {
             self.fast_model_from_disk = true;
             self.resolved_fast_model = Some(model.clone());
             return Ok(model);
@@ -293,9 +286,7 @@ impl AppServer {
                 "run 'codex login', then try again",
             )
         })?;
-        if let Some(path) = fast_model_cache_path() {
-            write_cached_fast_model(&path, &model, now());
-        }
+        FAST_MODEL_CACHE.write(&model);
         self.fast_model_from_disk = false;
         self.resolved_fast_model = Some(model.clone());
         Ok(model)
@@ -514,58 +505,6 @@ fn required_string(value: &Value, key: &str, name: &str) -> Result<String> {
     })
 }
 
-fn fast_model_cache_path() -> Option<PathBuf> {
-    fast_model_cache_path_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
-}
-
-fn fast_model_cache_path_from(
-    xdg_cache_home: Option<OsString>,
-    home: Option<OsString>,
-) -> Option<PathBuf> {
-    if let Some(path) = xdg_cache_home.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path).join("wut/codex.json"));
-    }
-    home.filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".cache/wut/codex.json"))
-}
-
-fn read_cached_fast_model(path: &Path, now: u64) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
-    let model = value.get("fast_model")?.as_str()?;
-    if model.is_empty() {
-        return None;
-    }
-    let resolved_at = value.get("resolved_at")?.as_u64()?;
-    // A resolution timestamp in the future means the clock moved backwards;
-    // treat the entry as stale rather than trusting it indefinitely.
-    let age = now.checked_sub(resolved_at)?;
-    (age < FAST_MODEL_CACHE_TTL_SECONDS).then(|| model.to_owned())
-}
-
-fn write_cached_fast_model(path: &Path, model: &str, resolved_at: u64) {
-    let value = json!({
-        "fast_model": model,
-        "resolved_at": resolved_at,
-    });
-    // The cache only saves a round-trip; never fail a turn over it.
-    if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
-        let _ = storage::write_private(path, &bytes, "codex model cache");
-    }
-}
-
-fn invalidate_cached_fast_model(path: &Path) {
-    let _ = fs::remove_file(path);
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 impl Drop for AppServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -597,18 +536,9 @@ fn response_error(response: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
 
-    use super::{
-        FAST_MODEL_CACHE_TTL_SECONDS, fast_model_cache_path_from, fastest_model,
-        invalidate_cached_fast_model, read_cached_fast_model, select_fast_model,
-        write_cached_fast_model,
-    };
+    use super::{fastest_model, select_fast_model};
     use crate::harness::Model;
 
     fn model(id: &str, is_default: bool) -> Model {
@@ -651,93 +581,6 @@ mod tests {
         assert_eq!(
             fastest_model(&[model("custom", true)]).unwrap().id,
             "custom"
-        );
-    }
-
-    fn unique_cache_directory(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("wut-{label}-{}-{nonce}", std::process::id()))
-    }
-
-    #[test]
-    fn fast_model_cache_round_trips_until_the_ttl_expires() {
-        let directory = unique_cache_directory("codex-cache-ttl");
-        let path = directory.join("codex.json");
-
-        write_cached_fast_model(&path, "gpt-5.3-codex-spark", 1_000);
-
-        assert_eq!(
-            read_cached_fast_model(&path, 1_000).as_deref(),
-            Some("gpt-5.3-codex-spark")
-        );
-        assert_eq!(
-            read_cached_fast_model(&path, 1_000 + FAST_MODEL_CACHE_TTL_SECONDS - 1).as_deref(),
-            Some("gpt-5.3-codex-spark")
-        );
-        assert_eq!(
-            read_cached_fast_model(&path, 1_000 + FAST_MODEL_CACHE_TTL_SECONDS),
-            None
-        );
-
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn fast_model_cache_rejects_clock_rollback_and_malformed_entries() {
-        let directory = unique_cache_directory("codex-cache-invalid");
-        let path = directory.join("codex.json");
-
-        assert_eq!(read_cached_fast_model(&path, 1_000), None);
-
-        write_cached_fast_model(&path, "gpt-5.3-codex-spark", 2_000);
-        assert_eq!(read_cached_fast_model(&path, 1_999), None);
-
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(&path, b"not-json").unwrap();
-        assert_eq!(read_cached_fast_model(&path, 1_000), None);
-
-        fs::write(&path, b"{\"fast_model\":\"\",\"resolved_at\":1000}").unwrap();
-        assert_eq!(read_cached_fast_model(&path, 1_000), None);
-
-        fs::write(&path, b"{\"fast_model\":\"gpt\"}").unwrap();
-        assert_eq!(read_cached_fast_model(&path, 1_000), None);
-
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn invalidating_the_fast_model_cache_removes_the_entry() {
-        let directory = unique_cache_directory("codex-cache-invalidate");
-        let path = directory.join("codex.json");
-
-        write_cached_fast_model(&path, "gpt-5.3-codex-spark", 1_000);
-        assert!(read_cached_fast_model(&path, 1_000).is_some());
-
-        invalidate_cached_fast_model(&path);
-        assert_eq!(read_cached_fast_model(&path, 1_000), None);
-
-        invalidate_cached_fast_model(&path);
-
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn empty_home_does_not_create_a_relative_cache_path() {
-        assert_eq!(
-            fast_model_cache_path_from(None, Some(OsString::new())),
-            None
-        );
-        assert_eq!(fast_model_cache_path_from(None, None), None);
-        assert_eq!(
-            fast_model_cache_path_from(Some(OsString::from("/cache")), None),
-            Some(PathBuf::from("/cache/wut/codex.json"))
-        );
-        assert_eq!(
-            fast_model_cache_path_from(None, Some(OsString::from("/home/user"))),
-            Some(PathBuf::from("/home/user/.cache/wut/codex.json"))
         );
     }
 }
