@@ -299,7 +299,7 @@ pub static DEFINITIONS: &[Definition] = &[
         aliases: &["grok-cli"],
         name: "Grok",
         description: "xAI Grok Build",
-        default_model: None,
+        default_model: Some("fast"),
         default_reasoning: None,
         reasoning: ReasoningControl::Selectable,
         program_env: "WUT_GROK_BIN",

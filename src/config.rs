@@ -305,6 +305,8 @@ mod tests {
         assert_eq!(config.reasoning("cursor"), None);
         assert_eq!(config.model("codex"), Some("fast"));
         assert_eq!(config.reasoning("codex"), Some("low"));
+        assert_eq!(config.model("grok"), Some("fast"));
+        assert_eq!(config.reasoning("grok"), None);
         assert_eq!(config.instructions(), &Instructions::Concise);
     }
 

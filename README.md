@@ -93,6 +93,8 @@ Because this repository is private, release discovery and downloads prefer an au
 
 Under the hood, `wut` runs a coding-agent CLI already installed and authenticated on your machine. Fresh installs default to Codex with the `fast` model alias, which prefers GPT-5.3 Codex Spark when available. Run `wut --settings` to choose another default agent, model, reasoning level, or answer style.
 
+Grok also defaults to the `fast` alias. It prefers Grok Code Fast 1, then a `-fast` variant of the current flagship such as `grok-4.6-fast`, then whatever Grok Build reports as its default. Both aliases resolve against the live catalog once a day and cache the result under `${XDG_CACHE_HOME:-$HOME/.cache}/wut/`; a cached model that the provider has since retired is re-resolved automatically.
+
 | Agent | Command | Read-only control | Continuation |
 |---|---|---|---|
 | Cursor | `cursor-agent` (falls back to `agent`) | Ask mode (`--mode ask`) | Saved chat IDs |

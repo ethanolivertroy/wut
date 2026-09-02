@@ -19,6 +19,7 @@ struct Fixture {
     root: PathBuf,
     cursor: PathBuf,
     codex: PathBuf,
+    grok: PathBuf,
     _serial: MutexGuard<'static, ()>,
 }
 
@@ -34,10 +35,12 @@ impl Fixture {
         fs::create_dir_all(&root).unwrap();
         let cursor = root.join("fake-cursor");
         let codex = root.join("fake-codex");
+        let grok = root.join("fake-grok");
         Self {
             root,
             cursor,
             codex,
+            grok,
             _serial: serial,
         }
     }
@@ -50,6 +53,27 @@ impl Fixture {
     fn write_codex(&self) {
         fs::write(&self.codex, successful_codex()).unwrap();
         fs::set_permissions(&self.codex, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn write_grok(&self) {
+        fs::write(
+            &self.grok,
+            format!("#!/bin/sh\nset -eu\n{}\n", successful_grok()),
+        )
+        .unwrap();
+        fs::set_permissions(&self.grok, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn configure_grok(&self) {
+        write(
+            self.root.join("config/wut/config.json"),
+            r#"{
+  "version": 2,
+  "agent": "grok",
+  "instructions": "concise",
+  "agents": {"grok": {"model": "fast", "reasoning": null}}
+}"#,
+        );
     }
 
     fn configure_cursor(&self) {
@@ -93,6 +117,7 @@ impl Fixture {
             .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env("WUT_CODEX_BIN", &self.codex)
             .env("WUT_CURSOR_BIN", &self.cursor)
+            .env("WUT_GROK_BIN", &self.grok)
             .env("WUT_NO_UPDATE_CHECK", "1");
         command
     }
@@ -155,6 +180,35 @@ for line in sys.stdin:
             emit({"method": "item/agentMessage/delta", "params": {"delta": "hello"}})
             emit({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "hello"}}})
             emit({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"#
+}
+
+// Fake Grok Build CLI. `grok models` prints the catalog from
+// WUT_TEST_GROK_MODELS (default: the flagship plus the fast coding model).
+// `grok -p ...` logs its arguments and, unless the chosen model is listed in
+// WUT_TEST_GROK_RETIRED, streams a one-word answer.
+fn successful_grok() -> &'static str {
+    r#"
+if [ "$1" = models ]; then
+    printf 'Default model: grok-4.6\n\nAvailable models:\n'
+    printf '%s\n' "${WUT_TEST_GROK_MODELS:-  * grok-4.6 (default)
+  - grok-code-fast-1}"
+    exit 0
+fi
+printf '%s\n' "$@" >> "$WUT_TEST_ARGS"
+model=
+while [ $# -gt 0 ]; do
+    if [ "$1" = --model ]; then model=$2; fi
+    shift
+done
+case " ${WUT_TEST_GROK_RETIRED:-} " in
+    *" $model "*)
+        printf 'unknown model %s\n' "$model" >&2
+        exit 2
+        ;;
+esac
+printf '%s\n' '{"type":"text","data":"hello"}'
+printf '%s\n' '{"type":"end","stop_reason":"stop","session_id":"grok-session-1"}'
 "#
 }
 
@@ -316,6 +370,118 @@ fn fresh_run_uses_codex_spark_and_private_canonical_state() {
         sessions[0].metadata().unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn grok_fast_alias_resolves_to_the_fastest_model_and_is_cached() {
+    let fixture = Fixture::new();
+    fixture.write_grok();
+    fixture.configure_grok();
+    let args_path = fixture.root.join("provider-args");
+
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "hello\n");
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("--model\ngrok-code-fast-1\n"), "{args}");
+    assert!(!args.contains("\nfast\n"), "{args}");
+    assert!(args.contains("--permission-mode\nplan\n"), "{args}");
+
+    let cache = fixture.root.join("cache/wut/grok.json");
+    let cached = fs::read_to_string(&cache).unwrap();
+    assert!(
+        cached.contains(r#""fast_model": "grok-code-fast-1""#),
+        "{cached}"
+    );
+    assert_eq!(
+        fs::metadata(&cache).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    // The cached model is reused without asking the CLI for its catalog.
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .env("WUT_TEST_GROK_MODELS", "  * grok-4.6 (default)")
+        .args(["-c", "and", "this?"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert_eq!(args.matches("--model\ngrok-code-fast-1\n").count(), 2);
+    assert!(args.contains("--resume\ngrok-session-1\n"), "{args}");
+}
+
+#[test]
+fn grok_retired_cached_fast_model_is_re_resolved_once() {
+    let fixture = Fixture::new();
+    fixture.write_grok();
+    fixture.configure_grok();
+    let args_path = fixture.root.join("provider-args");
+    write(
+        fixture.root.join("cache/wut/grok.json"),
+        &format!(
+            r#"{{"fast_model":"grok-code-fast-0","resolved_at":{}}}"#,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ),
+    );
+
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .env("WUT_TEST_GROK_RETIRED", "grok-code-fast-0")
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "hello\n");
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert_eq!(args.matches("--model\ngrok-code-fast-0\n").count(), 1);
+    assert_eq!(args.matches("--model\ngrok-code-fast-1\n").count(), 1);
+    let cached = fs::read_to_string(fixture.root.join("cache/wut/grok.json")).unwrap();
+    assert!(
+        cached.contains(r#""fast_model": "grok-code-fast-1""#),
+        "{cached}"
+    );
+
+    // A genuine failure with an up-to-date cache is surfaced, not retried.
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .env("WUT_TEST_GROK_RETIRED", "grok-code-fast-1")
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("unknown model grok-code-fast-1"),
+        "{stderr}"
+    );
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert_eq!(args.matches("--model\ngrok-code-fast-1\n").count(), 2);
 }
 
 #[test]

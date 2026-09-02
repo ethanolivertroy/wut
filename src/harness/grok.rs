@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+use super::fast_model;
 use super::{Harness, Model, ReasoningLevel, Response, RunOptions, bounded_output, capture_stderr};
 use crate::error::{Error, Result};
 
@@ -14,13 +15,104 @@ const REASONING_LEVELS: &[(&str, &str)] = &[
     ("high", "Deep reasoning"),
 ];
 
+// Ordered by expected latency: the small coding model serves at 100+ tok/s,
+// the "-fast" flagship variants are the same weights on faster routing.
+const FAST_MODELS: &[&str] = &["grok-code-fast-1", "grok-4.6-fast", "grok-4.1-fast"];
+const FAST_MODEL_CACHE: fast_model::Cache = fast_model::Cache::new("grok");
+
 pub(super) struct Grok {
     program: OsString,
+    resolved_fast_model: Option<String>,
+    fast_model_from_disk: bool,
 }
 
 impl Grok {
     pub(super) fn new(program: OsString) -> Self {
-        Self { program }
+        Self {
+            program,
+            resolved_fast_model: None,
+            fast_model_from_disk: false,
+        }
+    }
+
+    fn catalog(&self) -> Result<Vec<Model>> {
+        let mut command = Command::new(&self.program);
+        command.arg("models");
+        let output = bounded_output(&mut command).map_err(start_error)?;
+        if !output.status.success() {
+            return Err(Error::agent(
+                "grok",
+                format!("could not list Grok models: {}", output.stderr.trim()),
+            ));
+        }
+        let output = String::from_utf8(output.stdout).map_err(|_| {
+            Error::agent(
+                "grok",
+                "Grok returned a model list that was not valid UTF-8",
+            )
+        })?;
+        parse_models(&output)
+    }
+
+    fn fast_model(&mut self) -> Result<String> {
+        if let Some(model) = &self.resolved_fast_model {
+            return Ok(model.clone());
+        }
+        if let Some(model) = FAST_MODEL_CACHE.read() {
+            self.fast_model_from_disk = true;
+            self.resolved_fast_model = Some(model.clone());
+            return Ok(model);
+        }
+        self.resolve_fast_model()
+    }
+
+    fn resolve_fast_model(&mut self) -> Result<String> {
+        let models = self.catalog()?;
+        let model = fastest_model(&models)
+            .map(|model| model.id.clone())
+            .ok_or_else(|| Error::agent("grok", "Grok did not report an available model"))?;
+        FAST_MODEL_CACHE.write(&model);
+        self.fast_model_from_disk = false;
+        self.resolved_fast_model = Some(model.clone());
+        Ok(model)
+    }
+
+    fn run_once(
+        &self,
+        question: &str,
+        session_id: Option<&str>,
+        model: Option<&str>,
+        options: &RunOptions<'_>,
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
+        let options = RunOptions {
+            model,
+            reasoning: options.reasoning,
+            instructions: options.instructions,
+        };
+        let mut child = self
+            .command(question, session_id, &options)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(start_error)?;
+        let stdout = child.stdout.take().expect("piped stdout is available");
+        let stderr = child.stderr.take().expect("piped stderr is available");
+        let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+
+        let result = read_events(BufReader::new(stdout), on_delta);
+        let status = child
+            .wait()
+            .map_err(|error| Error::agent("grok", format!("could not wait for Grok: {error}")))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| Error::agent("grok", "could not read Grok error output"))?
+            .into_detail();
+
+        if !status.success() {
+            return Err(failure(status, &stderr));
+        }
+        result
     }
 
     fn command(
@@ -57,22 +149,23 @@ impl Grok {
 
 impl Harness for Grok {
     fn models(&mut self) -> Result<Vec<Model>> {
-        let mut command = Command::new(&self.program);
-        command.arg("models");
-        let output = bounded_output(&mut command).map_err(start_error)?;
-        if !output.status.success() {
-            return Err(Error::agent(
-                "grok",
-                format!("could not list Grok models: {}", output.stderr.trim()),
-            ));
+        let mut models = self.catalog()?;
+        if !models.iter().any(|model| model.id == "fast")
+            && let Some(model) = fastest_model(&models).cloned()
+        {
+            models.insert(
+                0,
+                Model {
+                    id: "fast".into(),
+                    name: "Fastest available".into(),
+                    description: format!("Currently uses {}", model.name),
+                    is_default: false,
+                    reasoning: model.reasoning,
+                    default_reasoning: model.default_reasoning,
+                },
+            );
         }
-        let output = String::from_utf8(output.stdout).map_err(|_| {
-            Error::agent(
-                "grok",
-                "Grok returned a model list that was not valid UTF-8",
-            )
-        })?;
-        parse_models(&output)
+        Ok(models)
     }
 
     fn run(
@@ -82,30 +175,55 @@ impl Harness for Grok {
         options: RunOptions<'_>,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Response> {
-        let mut child = self
-            .command(question, session_id, &options)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(start_error)?;
-        let stdout = child.stdout.take().expect("piped stdout is available");
-        let stderr = child.stderr.take().expect("piped stderr is available");
-        let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+        let fast = options.model == Some("fast");
+        let model = if fast {
+            Some(self.fast_model()?)
+        } else {
+            options.model.map(str::to_owned)
+        };
 
-        let result = read_events(BufReader::new(stdout), on_delta);
-        let status = child
-            .wait()
-            .map_err(|error| Error::agent("grok", format!("could not wait for Grok: {error}")))?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| Error::agent("grok", "could not read Grok error output"))?
-            .into_detail();
-
-        if !status.success() {
-            return Err(failure(status, &stderr));
+        let mut streamed = false;
+        let result = {
+            let mut tracking = |delta: &str| {
+                streamed = true;
+                on_delta(delta)
+            };
+            self.run_once(
+                question,
+                session_id,
+                model.as_deref(),
+                &options,
+                &mut tracking,
+            )
+        };
+        let Err(error) = result else {
+            return result;
+        };
+        // A cached fast model may have been retired since it was resolved.
+        // Re-resolve once and retry, but only when nothing was shown yet and
+        // the catalog actually names a different model; otherwise the failure
+        // has some other cause and a second run would just repeat it.
+        if !(fast && self.fast_model_from_disk && !streamed) {
+            return Err(error);
         }
-        result
+        FAST_MODEL_CACHE.invalidate();
+        self.resolved_fast_model = None;
+        self.fast_model_from_disk = false;
+        let fresh = self.resolve_fast_model()?;
+        if Some(fresh.as_str()) == model.as_deref() {
+            return Err(error);
+        }
+        self.run_once(question, session_id, Some(&fresh), &options, on_delta)
     }
+}
+
+fn fastest_model(models: &[Model]) -> Option<&Model> {
+    FAST_MODELS
+        .iter()
+        .find_map(|id| models.iter().find(|model| model.id == *id))
+        .or_else(|| models.iter().find(|model| model.id.contains("fast")))
+        .or_else(|| models.iter().find(|model| model.is_default))
+        .or_else(|| models.first())
 }
 
 fn start_error(error: std::io::Error) -> Error {
@@ -241,21 +359,38 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{Grok, parse_models, read_events};
-    use crate::harness::{Harness, RunOptions};
+    use super::{Grok, fastest_model, parse_models, read_events};
+    use crate::harness::{Harness, Model, RunOptions};
 
-    #[test]
-    fn nonzero_exit_rejects_a_parsed_success() {
+    fn fake_program(label: &str, script: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let program = std::env::temp_dir().join(format!(
-            "wut-grok-nonzero-test-{}-{unique}",
+            "wut-grok-{label}-test-{}-{unique}",
             std::process::id()
         ));
-        fs::write(
-            &program,
+        fs::write(&program, script).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    fn model(id: &str, is_default: bool) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            is_default,
+            reasoning: Vec::new(),
+            default_reasoning: None,
+        }
+    }
+
+    #[test]
+    fn nonzero_exit_rejects_a_parsed_success() {
+        let program = fake_program(
+            "nonzero",
             concat!(
                 "#!/bin/sh\n",
                 "printf '%s\\n' '{\"type\":\"text\",\"data\":\"hello\"}'\n",
@@ -263,12 +398,8 @@ mod tests {
                 "printf '%s\\n' 'transport cleanup failed' >&2\n",
                 "exit 7\n",
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut harness = Grok {
-            program: program.clone().into_os_string(),
-        };
+        );
+        let mut harness = Grok::new(program.clone().into_os_string());
 
         let error = harness
             .run(
@@ -289,9 +420,7 @@ mod tests {
 
     #[test]
     fn command_is_read_only_and_resumes_sessions() {
-        let harness = Grok {
-            program: "grok".into(),
-        };
+        let harness = Grok::new("grok".into());
         let command = harness.command(
             "hello",
             Some("session-1"),
@@ -344,6 +473,57 @@ mod tests {
         assert_eq!(models[0].reasoning.len(), 4);
         assert_eq!(models[1].id, "grok-4.5");
         assert!(!models[1].is_default);
+    }
+
+    #[test]
+    fn fastest_model_prefers_the_coding_model_then_fast_variants_then_default() {
+        let full = [
+            model("grok-4.6", true),
+            model("grok-4.6-fast", false),
+            model("grok-code-fast-1", false),
+        ];
+        assert_eq!(fastest_model(&full).unwrap().id, "grok-code-fast-1");
+
+        let flagship_only = [model("grok-4.6", true), model("grok-4.6-fast", false)];
+        assert_eq!(fastest_model(&flagship_only).unwrap().id, "grok-4.6-fast");
+
+        let unknown_fast = [model("grok-4.6", true), model("grok-5-fast-preview", false)];
+        assert_eq!(
+            fastest_model(&unknown_fast).unwrap().id,
+            "grok-5-fast-preview"
+        );
+
+        let no_fast = [model("grok-4.5", false), model("grok-4.6", true)];
+        assert_eq!(fastest_model(&no_fast).unwrap().id, "grok-4.6");
+        assert_eq!(
+            fastest_model(&[model("custom", false)]).unwrap().id,
+            "custom"
+        );
+        assert!(fastest_model(&[]).is_none());
+    }
+
+    #[test]
+    fn catalog_gains_a_fast_alias_that_names_its_target() {
+        let program = fake_program(
+            "catalog",
+            concat!(
+                "#!/bin/sh\n",
+                "[ \"$1\" = models ] || exit 9\n",
+                "printf '%s\\n' 'Default model: grok-4.6' '' 'Available models:' '  * grok-4.6 (default)' '  - grok-code-fast-1'\n",
+            ),
+        );
+        let mut harness = Grok::new(program.clone().into_os_string());
+
+        let models = harness.models().unwrap();
+
+        assert_eq!(models[0].id, "fast");
+        assert_eq!(models[0].description, "Currently uses grok-code-fast-1");
+        assert_eq!(models[0].reasoning.len(), 4);
+        assert!(!models[0].is_default);
+        assert_eq!(models[1].id, "grok-4.6");
+        assert!(models[1].is_default);
+        assert_eq!(models[2].id, "grok-code-fast-1");
+        fs::remove_file(program).unwrap();
     }
 
     #[test]
