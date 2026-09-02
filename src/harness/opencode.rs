@@ -1,9 +1,10 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value, json};
 
+use super::fast_model;
 use super::{Harness, Model, Response, RunOptions, bounded_output, capture_stderr};
 use crate::error::{Error, Result};
 
@@ -11,32 +12,36 @@ const AGENT_ID: &str = "wut-read-only";
 
 pub(super) struct OpenCode {
     program: OsString,
+    alias: fast_model::Alias,
 }
 
 impl OpenCode {
     pub(super) fn new(program: OsString) -> Self {
-        Self { program }
+        Self {
+            program,
+            alias: fast_model::Alias::new("opencode"),
+        }
     }
 
     fn command(
-        &self,
+        program: &OsStr,
         question: &str,
         session_id: Option<&str>,
         options: &RunOptions<'_>,
     ) -> Result<Command> {
         let existing = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
-        self.command_with_config(question, session_id, options, existing.as_deref())
+        Self::command_with_config(program, question, session_id, options, existing.as_deref())
     }
 
     fn command_with_config(
-        &self,
+        program: &OsStr,
         question: &str,
         session_id: Option<&str>,
         options: &RunOptions<'_>,
         existing: Option<&str>,
     ) -> Result<Command> {
         let config = inline_config(existing, options.instructions)?;
-        let mut command = Command::new(&self.program);
+        let mut command = Command::new(program);
         command
             .args(["--pure", "run", "--agent", AGENT_ID, "--format", "json"])
             .env("OPENCODE_CONFIG_CONTENT", config)
@@ -55,22 +60,9 @@ impl OpenCode {
 
 impl Harness for OpenCode {
     fn models(&mut self) -> Result<Vec<Model>> {
-        let mut command = Command::new(&self.program);
-        command.args(["--pure", "models"]);
-        let output = bounded_output(&mut command).map_err(start_error)?;
-        if !output.status.success() {
-            return Err(command_error(
-                "could not list OpenCode models",
-                &output.stderr,
-            ));
-        }
-        let output = String::from_utf8(output.stdout).map_err(|_| {
-            Error::agent(
-                "opencode",
-                "OpenCode returned a model list that was not valid UTF-8",
-            )
-        })?;
-        parse_models(&output)
+        let models = catalog(&self.program)?;
+        let target = fastest_model(&models).cloned();
+        Ok(fast_model::with_alias(models, target.as_ref()))
     }
 
     fn run(
@@ -80,47 +72,107 @@ impl Harness for OpenCode {
         options: RunOptions<'_>,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Response> {
-        let mut child = self
-            .command(question, session_id, &options)?
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(start_error)?;
-        let stdout = child.stdout.take().expect("piped stdout is available");
-        let stderr = child.stderr.take().expect("piped stderr is available");
-        let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+        let program = self.program.as_os_str();
+        let run_once = |model: Option<&str>, on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            let options = RunOptions { model, ..options };
+            run_once(program, question, session_id, &options, on_delta)
+        };
+        if options.model != Some(fast_model::ALIAS) {
+            return run_once(options.model, on_delta);
+        }
+        let refresh = || {
+            let models = catalog(program)?;
+            fastest_model(&models)
+                .map(|model| model.id.clone())
+                .ok_or_else(no_fast_provider)
+        };
+        self.alias.run(
+            &refresh,
+            &mut |model, on_delta| run_once(Some(model), on_delta),
+            on_delta,
+        )
+    }
+}
 
-        let response = read_events(BufReader::new(stdout), on_delta);
-        let status = child.wait().map_err(|error| {
+fn catalog(program: &OsStr) -> Result<Vec<Model>> {
+    let mut command = Command::new(program);
+    command.args(["--pure", "models"]);
+    let output = bounded_output(&mut command).map_err(start_error)?;
+    if !output.status.success() {
+        return Err(command_error(
+            "could not list OpenCode models",
+            &output.stderr,
+        ));
+    }
+    let output = String::from_utf8(output.stdout).map_err(|_| {
+        Error::agent(
+            "opencode",
+            "OpenCode returned a model list that was not valid UTF-8",
+        )
+    })?;
+    parse_models(&output)
+}
+
+fn run_once(
+    program: &OsStr,
+    question: &str,
+    session_id: Option<&str>,
+    options: &RunOptions<'_>,
+    on_delta: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<Response> {
+    let mut child = OpenCode::command(program, question, session_id, options)?
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(start_error)?;
+    let stdout = child.stdout.take().expect("piped stdout is available");
+    let stderr = child.stderr.take().expect("piped stderr is available");
+    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+
+    let response = read_events(BufReader::new(stdout), on_delta);
+    let status = child.wait().map_err(|error| {
+        Error::new(
+            format!("could not wait for OpenCode: {error}"),
+            "restart wut and try again",
+        )
+    })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| {
             Error::new(
-                format!("could not wait for OpenCode: {error}"),
+                "could not read OpenCode error output",
                 "restart wut and try again",
             )
-        })?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| {
-                Error::new(
-                    "could not read OpenCode error output",
-                    "restart wut and try again",
-                )
-            })?
-            .into_detail();
+        })?
+        .into_detail();
 
-        if !status.success() {
-            if stderr.trim().is_empty() {
-                return match response {
-                    Err(error) => Err(error),
-                    Ok(_) => Err(Error::agent(
-                        "opencode",
-                        format!("OpenCode exited with {status}"),
-                    )),
-                };
-            }
-            return Err(command_error("OpenCode failed", &stderr));
+    if !status.success() {
+        if stderr.trim().is_empty() {
+            return match response {
+                Err(error) => Err(error),
+                Ok(_) => Err(Error::agent(
+                    "opencode",
+                    format!("OpenCode exited with {status}"),
+                )),
+            };
         }
-        response
+        return Err(command_error("OpenCode failed", &stderr));
     }
+    response
+}
+
+/// OpenCode has no fast model of its own; `fast` means a wafer-scale or LPU
+/// provider the user has connected. Cerebras first, then Groq.
+fn fastest_model(models: &[Model]) -> Option<&Model> {
+    fast_model::cerebras_model(models)
+        .or_else(|| models.iter().find(|model| model.id.starts_with("groq/")))
+}
+
+fn no_fast_provider() -> Error {
+    Error::new(
+        "OpenCode has no Cerebras or Groq models connected",
+        "run 'opencode', use /connect to add Cerebras, or pick a model in 'wut --settings'",
+    )
 }
 
 fn inline_config(existing: Option<&str>, instructions: Option<&str>) -> Result<String> {
@@ -312,11 +364,12 @@ fn command_error(message: &str, stderr: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::io::Cursor;
 
     use serde_json::Value;
 
-    use super::{OpenCode, inline_config, parse_models, read_events};
+    use super::{OpenCode, fastest_model, inline_config, parse_models, read_events};
     use crate::harness::RunOptions;
 
     #[test]
@@ -344,21 +397,18 @@ mod tests {
 
     #[test]
     fn builds_a_session_command() {
-        let harness = OpenCode {
-            program: "opencode".into(),
-        };
-        let command = harness
-            .command_with_config(
-                "hello",
-                Some("session-1"),
-                &RunOptions {
-                    model: Some("anthropic/claude-test"),
-                    reasoning: None,
-                    instructions: None,
-                },
-                None,
-            )
-            .unwrap();
+        let command = OpenCode::command_with_config(
+            OsStr::new("opencode"),
+            "hello",
+            Some("session-1"),
+            &RunOptions {
+                model: Some("anthropic/claude-test"),
+                reasoning: None,
+                instructions: None,
+            },
+            None,
+        )
+        .unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy())
@@ -386,21 +436,18 @@ mod tests {
 
     #[test]
     fn dash_prefixed_question_follows_option_terminator() {
-        let harness = OpenCode {
-            program: "opencode".into(),
-        };
-        let command = harness
-            .command_with_config(
-                "-why did this fail",
-                None,
-                &RunOptions {
-                    model: None,
-                    reasoning: None,
-                    instructions: None,
-                },
-                None,
-            )
-            .unwrap();
+        let command = OpenCode::command_with_config(
+            OsStr::new("opencode"),
+            "-why did this fail",
+            None,
+            &RunOptions {
+                model: None,
+                reasoning: None,
+                instructions: None,
+            },
+            None,
+        )
+        .unwrap();
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy())
@@ -419,6 +466,28 @@ mod tests {
         assert_eq!(models[0].id, "opencode/free");
         assert_eq!(models[1].name, "sonnet");
         assert_eq!(models[1].description, "anthropic provider");
+    }
+
+    #[test]
+    fn fast_means_cerebras_then_groq_and_nothing_else() {
+        let models = parse_models(concat!(
+            "anthropic/claude-sonnet\n",
+            "groq/llama-3.3-70b-versatile\n",
+            "cerebras/gemma-4-31b\n",
+            "cerebras/gpt-oss-120b\n",
+        ))
+        .unwrap();
+        assert_eq!(fastest_model(&models).unwrap().id, "cerebras/gpt-oss-120b");
+
+        let groq_only =
+            parse_models("anthropic/claude-sonnet\ngroq/llama-3.3-70b-versatile\n").unwrap();
+        assert_eq!(
+            fastest_model(&groq_only).unwrap().id,
+            "groq/llama-3.3-70b-versatile"
+        );
+
+        let neither = parse_models("anthropic/claude-sonnet\nopenai/gpt-5.4\n").unwrap();
+        assert!(fastest_model(&neither).is_none());
     }
 
     #[test]

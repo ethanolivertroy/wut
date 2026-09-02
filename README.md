@@ -93,7 +93,16 @@ Because this repository is private, release discovery and downloads prefer an au
 
 Under the hood, `wut` runs a coding-agent CLI already installed and authenticated on your machine. Fresh installs default to Codex with the `fast` model alias, which prefers GPT-5.3 Codex Spark when available. Run `wut --settings` to choose another default agent, model, reasoning level, or answer style.
 
-Grok also defaults to the `fast` alias. It prefers Grok Code Fast 1, then a `-fast` variant of the current flagship such as `grok-4.6-fast`, then whatever Grok Build reports as its default. Both aliases resolve against the live catalog once a day and cache the result under `${XDG_CACHE_HOME:-$HOME/.cache}/wut/`; a cached model that the provider has since retired is re-resolved automatically.
+Grok also defaults to the `fast` alias. It prefers a Cerebras-hosted model when Grok Build has one (see below), then Grok Code Fast 1, then a `-fast` variant of the current flagship such as `grok-4.6-fast`, then whatever Grok Build reports as its default. OpenCode and Pi offer `fast` too once a Cerebras or Groq provider is connected. Every alias resolves against the live catalog once a day and caches the result under `${XDG_CACHE_HOME:-$HOME/.cache}/wut/`; a cached model that the provider has since retired is re-resolved automatically.
+
+### Cerebras
+
+Cerebras serves open models at 1000+ tokens per second, and `wut` treats any Cerebras-hosted model as the fastest choice for `fast`. It prefers `gpt-oss-120b`, then `gemma-4-31b`, then any other model the provider lists. `wut` never calls Cerebras itself; it reaches it through whichever agent you have connected:
+
+- Codex: GPT-5.3 Codex Spark already runs on Cerebras hardware. Nothing to configure.
+- OpenCode: run `opencode`, use `/connect` to add Cerebras with an API key, then choose `fast` in `wut --settings`.
+- Pi: export `CEREBRAS_API_KEY`, then choose `fast`.
+- Grok Build: point it at Cerebras with `GROK_MODELS_BASE_URL=https://api.cerebras.ai/v1` and `XAI_API_KEY=<cerebras key>`, or add a `[model.<name>]` entry with that `base_url` in `~/.grok/config.toml`. Include "Cerebras" in the entry's display name if you use a custom model id, so `wut` can recognise it.
 
 | Agent | Command | Read-only control | Continuation |
 |---|---|---|---|

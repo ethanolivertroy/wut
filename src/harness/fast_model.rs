@@ -5,9 +5,165 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use super::{Model, Response};
+use crate::error::Result;
 use crate::storage;
 
 pub(super) const CACHE_TTL_SECONDS: u64 = 24 * 60 * 60;
+
+/// The model id every harness accepts as "whatever is fastest right now".
+pub(super) const ALIAS: &str = "fast";
+
+/// Streams one turn against a concrete model id, forwarding answer deltas.
+pub(super) type RunOnce<'a> =
+    dyn FnMut(&str, &mut dyn FnMut(&str) -> Result<()>) -> Result<Response> + 'a;
+
+/// Models served from Cerebras wafer-scale hardware (1000+ tokens/s), most
+/// capable coding model first. Deprecated ids stay so that agents still
+/// configured with them keep resolving; nothing here is ever the *only* way
+/// a Cerebras model is recognised (see `cerebras_id`).
+const CEREBRAS_MODELS: &[&str] = &[
+    "gpt-oss-120b",
+    "gemma-4-31b",
+    "zai-glm-4.7",
+    "qwen-3-coder-480b",
+    "zai-glm-4.6",
+    "qwen-3-235b-a22b-instruct-2507",
+    "qwen-3-32b",
+    "llama-4-scout-17b-16e-instruct",
+    "llama-3.3-70b",
+    "llama3.1-8b",
+];
+
+/// Identify a Cerebras-hosted model and return its bare Cerebras id.
+///
+/// Agents surface Cerebras three ways: as a `cerebras/` provider prefix
+/// (OpenCode, Pi), as bare Cerebras ids when the whole CLI is pointed at
+/// `api.cerebras.ai` (Grok Build with `GROK_MODELS_BASE_URL`), or as a
+/// custom endpoint the user labelled "cerebras" themselves.
+fn cerebras_id(model: &Model) -> Option<&str> {
+    if let Some(id) = model.id.strip_prefix("cerebras/") {
+        return Some(id);
+    }
+    if CEREBRAS_MODELS.contains(&model.id.as_str()) {
+        return Some(&model.id);
+    }
+    [&model.id, &model.name, &model.description]
+        .iter()
+        .any(|text| text.to_ascii_lowercase().contains("cerebras"))
+        .then_some(model.id.as_str())
+}
+
+/// The best Cerebras-hosted model in a catalog, if any.
+pub(super) fn cerebras_model(models: &[Model]) -> Option<&Model> {
+    let hosted = models
+        .iter()
+        .filter_map(|model| cerebras_id(model).map(|id| (model, id)))
+        .collect::<Vec<_>>();
+    CEREBRAS_MODELS
+        .iter()
+        .find_map(|preferred| {
+            hosted
+                .iter()
+                .find(|(_, id)| id == preferred)
+                .map(|(model, _)| *model)
+        })
+        .or_else(|| hosted.first().map(|(model, _)| *model))
+}
+
+/// Prepend a `fast` catalog entry that names the model it currently maps to.
+pub(super) fn with_alias(mut models: Vec<Model>, target: Option<&Model>) -> Vec<Model> {
+    if models.iter().any(|model| model.id == ALIAS) {
+        return models;
+    }
+    if let Some(target) = target {
+        models.insert(
+            0,
+            Model {
+                id: ALIAS.into(),
+                name: "Fastest available".into(),
+                description: format!("Currently uses {}", target.name),
+                is_default: false,
+                reasoning: target.reasoning.clone(),
+                default_reasoning: target.default_reasoning.clone(),
+            },
+        );
+    }
+    models
+}
+
+/// Resolution state for the `fast` alias within one harness instance.
+pub(super) struct Alias {
+    cache: Cache,
+    resolved: Option<String>,
+    from_disk: bool,
+}
+
+impl Alias {
+    pub(super) const fn new(agent: &'static str) -> Self {
+        Self {
+            cache: Cache::new(agent),
+            resolved: None,
+            from_disk: false,
+        }
+    }
+
+    /// The concrete model behind `fast`: memory, then disk, then `refresh`.
+    fn model(&mut self, refresh: &dyn Fn() -> Result<String>) -> Result<String> {
+        if let Some(model) = &self.resolved {
+            return Ok(model.clone());
+        }
+        if let Some(model) = self.cache.read() {
+            self.from_disk = true;
+            self.resolved = Some(model.clone());
+            return Ok(model);
+        }
+        self.refresh(refresh)
+    }
+
+    fn refresh(&mut self, refresh: &dyn Fn() -> Result<String>) -> Result<String> {
+        let model = refresh()?;
+        self.cache.write(&model);
+        self.from_disk = false;
+        self.resolved = Some(model.clone());
+        Ok(model)
+    }
+
+    /// Run one turn against the resolved fast model.
+    ///
+    /// A model remembered on disk may have been retired since it was
+    /// resolved. When such a turn fails before anything was shown, the cache
+    /// is dropped, the alias re-resolved once, and the turn retried, but only
+    /// if the catalog now names a different model; otherwise the failure has
+    /// some other cause and a second run would just repeat it.
+    pub(super) fn run(
+        &mut self,
+        refresh: &dyn Fn() -> Result<String>,
+        run_once: &mut RunOnce<'_>,
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Response> {
+        let model = self.model(refresh)?;
+        let mut streamed = false;
+        let result = run_once(&model, &mut |delta| {
+            streamed = true;
+            on_delta(delta)
+        });
+        let Err(error) = result else {
+            return result;
+        };
+        if !self.from_disk || streamed {
+            return Err(error);
+        }
+        self.cache.invalidate();
+        self.resolved = None;
+        self.from_disk = false;
+        let fresh = self.refresh(refresh)?;
+        if fresh == model {
+            return Err(error);
+        }
+        run_once(&fresh, on_delta)
+    }
+}
 
 /// Per-agent disk memo of the concrete model the `fast` alias resolved to.
 ///
@@ -106,9 +262,73 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        CACHE_TTL_SECONDS, cache_path_from, invalidate_cached_model, read_cached_model,
-        write_cached_model,
+        CACHE_TTL_SECONDS, cache_path_from, cerebras_model, invalidate_cached_model,
+        read_cached_model, with_alias, write_cached_model,
     };
+    use crate::harness::Model;
+
+    fn model(id: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: id.rsplit('/').next().unwrap_or(id).into(),
+            description: String::new(),
+            is_default: false,
+            reasoning: Vec::new(),
+            default_reasoning: None,
+        }
+    }
+
+    #[test]
+    fn cerebras_models_are_recognised_by_prefix_bare_id_or_label() {
+        let prefixed = [
+            model("anthropic/claude-sonnet"),
+            model("cerebras/gemma-4-31b"),
+            model("cerebras/gpt-oss-120b"),
+        ];
+        assert_eq!(
+            cerebras_model(&prefixed).unwrap().id,
+            "cerebras/gpt-oss-120b"
+        );
+
+        let bare = [
+            model("grok-4.6"),
+            model("gemma-4-31b"),
+            model("gpt-oss-120b"),
+        ];
+        assert_eq!(cerebras_model(&bare).unwrap().id, "gpt-oss-120b");
+
+        let mut labelled = model("company-fast");
+        labelled.description = "GPT OSS via Cerebras proxy".into();
+        let labelled = [model("grok-4.6"), labelled];
+        assert_eq!(cerebras_model(&labelled).unwrap().id, "company-fast");
+
+        let unknown_cerebras = [model("cerebras/brand-new-model")];
+        assert_eq!(
+            cerebras_model(&unknown_cerebras).unwrap().id,
+            "cerebras/brand-new-model"
+        );
+
+        assert!(cerebras_model(&[model("openai/gpt-5.4"), model("groq/llama")]).is_none());
+        assert!(cerebras_model(&[]).is_none());
+    }
+
+    #[test]
+    fn alias_is_prepended_once_and_names_its_target() {
+        let target = model("cerebras/gpt-oss-120b");
+        let models = with_alias(vec![model("grok-4.6"), target.clone()], Some(&target));
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "fast");
+        assert_eq!(models[0].name, "Fastest available");
+        assert_eq!(models[0].description, "Currently uses gpt-oss-120b");
+        assert!(!models[0].is_default);
+
+        let again = with_alias(models.clone(), Some(&target));
+        assert_eq!(again.len(), 3);
+
+        let none = with_alias(vec![model("grok-4.6")], None);
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].id, "grok-4.6");
+    }
 
     fn unique_cache_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()

@@ -1,9 +1,10 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+use super::fast_model;
 use super::{Harness, Model, ReasoningLevel, Response, RunOptions, bounded_output, capture_stderr};
 use crate::error::{Error, Result};
 
@@ -12,20 +13,24 @@ const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "x
 
 pub(super) struct Pi {
     program: OsString,
+    alias: fast_model::Alias,
 }
 
 impl Pi {
     pub(super) fn new(program: OsString) -> Self {
-        Self { program }
+        Self {
+            program,
+            alias: fast_model::Alias::new("pi"),
+        }
     }
 
     fn command(
-        &self,
+        program: &OsStr,
         question: &str,
         session_id: Option<&str>,
-        options: RunOptions<'_>,
+        options: &RunOptions<'_>,
     ) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command = Command::new(program);
         command.args([
             "--mode",
             "json",
@@ -53,15 +58,9 @@ impl Pi {
 
 impl Harness for Pi {
     fn models(&mut self) -> Result<Vec<Model>> {
-        let mut command = Command::new(&self.program);
-        command.arg("--list-models");
-        let output = bounded_output(&mut command).map_err(start_error)?;
-        if !output.status.success() {
-            return Err(command_error("could not list Pi models", &output.stderr));
-        }
-        let output = String::from_utf8(output.stdout)
-            .map_err(|_| Error::agent("pi", "Pi returned a model list that was not valid UTF-8"))?;
-        parse_models(&output)
+        let models = catalog(&self.program)?;
+        let target = fastest_model(&models).cloned();
+        Ok(fast_model::with_alias(models, target.as_ref()))
     }
 
     fn run(
@@ -71,38 +70,90 @@ impl Harness for Pi {
         options: RunOptions<'_>,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Response> {
-        let mut child = self
-            .command(question, session_id, options)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(start_error)?;
-        let stdout = child.stdout.take().expect("piped stdout is available");
-        let stderr = child.stderr.take().expect("piped stderr is available");
-        let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+        let program = self.program.as_os_str();
+        let run_once = |model: Option<&str>, on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            let options = RunOptions { model, ..options };
+            run_once(program, question, session_id, &options, on_delta)
+        };
+        if options.model != Some(fast_model::ALIAS) {
+            return run_once(options.model, on_delta);
+        }
+        let refresh = || {
+            let models = catalog(program)?;
+            fastest_model(&models)
+                .map(|model| model.id.clone())
+                .ok_or_else(no_fast_provider)
+        };
+        self.alias.run(
+            &refresh,
+            &mut |model, on_delta| run_once(Some(model), on_delta),
+            on_delta,
+        )
+    }
+}
 
-        let result = read_events(BufReader::new(stdout), on_delta);
-        let status = child.wait().map_err(|error| {
+fn catalog(program: &OsStr) -> Result<Vec<Model>> {
+    let mut command = Command::new(program);
+    command.arg("--list-models");
+    let output = bounded_output(&mut command).map_err(start_error)?;
+    if !output.status.success() {
+        return Err(command_error("could not list Pi models", &output.stderr));
+    }
+    let output = String::from_utf8(output.stdout)
+        .map_err(|_| Error::agent("pi", "Pi returned a model list that was not valid UTF-8"))?;
+    parse_models(&output)
+}
+
+fn run_once(
+    program: &OsStr,
+    question: &str,
+    session_id: Option<&str>,
+    options: &RunOptions<'_>,
+    on_delta: &mut dyn FnMut(&str) -> Result<()>,
+) -> Result<Response> {
+    let mut child = Pi::command(program, question, session_id, options)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(start_error)?;
+    let stdout = child.stdout.take().expect("piped stdout is available");
+    let stderr = child.stderr.take().expect("piped stderr is available");
+    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr));
+
+    let result = read_events(BufReader::new(stdout), on_delta);
+    let status = child.wait().map_err(|error| {
+        Error::new(
+            format!("could not wait for Pi: {error}"),
+            "restart wut and try again",
+        )
+    })?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| {
             Error::new(
-                format!("could not wait for Pi: {error}"),
+                "could not read Pi error output",
                 "restart wut and try again",
             )
-        })?;
-        let stderr = stderr_reader
-            .join()
-            .map_err(|_| {
-                Error::new(
-                    "could not read Pi error output",
-                    "restart wut and try again",
-                )
-            })?
-            .into_detail();
+        })?
+        .into_detail();
 
-        if !status.success() {
-            return Err(command_error("Pi failed", &stderr));
-        }
-        result
+    if !status.success() {
+        return Err(command_error("Pi failed", &stderr));
     }
+    result
+}
+
+/// Pi lists whichever providers have keys; `fast` means Cerebras, then Groq.
+fn fastest_model(models: &[Model]) -> Option<&Model> {
+    fast_model::cerebras_model(models)
+        .or_else(|| models.iter().find(|model| model.id.starts_with("groq/")))
+}
+
+fn no_fast_provider() -> Error {
+    Error::new(
+        "Pi has no Cerebras or Groq models available",
+        "set CEREBRAS_API_KEY (or GROQ_API_KEY) for Pi, or pick a model in 'wut --settings'",
+    )
 }
 
 fn parse_models(output: &str) -> Result<Vec<Model>> {
@@ -229,20 +280,19 @@ fn command_error(message: &str, stderr: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::io::Cursor;
 
-    use super::{Pi, parse_models, read_events};
+    use super::{Pi, fastest_model, parse_models, read_events};
     use crate::harness::RunOptions;
 
     #[test]
     fn combines_read_only_tools_with_answer_instructions() {
-        let harness = Pi {
-            program: "pi".into(),
-        };
-        let command = harness.command(
+        let command = Pi::command(
+            OsStr::new("pi"),
             "hello",
             None,
-            RunOptions {
+            &RunOptions {
                 model: None,
                 reasoning: None,
                 instructions: Some("Be concise."),
@@ -265,13 +315,11 @@ mod tests {
 
     #[test]
     fn dash_prefixed_question_follows_option_terminator() {
-        let harness = Pi {
-            program: "pi".into(),
-        };
-        let command = harness.command(
+        let command = Pi::command(
+            OsStr::new("pi"),
             "-why did this fail",
             None,
-            RunOptions {
+            &RunOptions {
                 model: None,
                 reasoning: None,
                 instructions: None,
@@ -300,6 +348,32 @@ mod tests {
         assert_eq!(models[0].reasoning.len(), 6);
         assert!(!models[1].is_default);
         assert!(models[1].reasoning.is_empty());
+    }
+
+    #[test]
+    fn fast_means_cerebras_then_groq() {
+        let models = parse_models(concat!(
+            "provider model context max-out thinking images\n",
+            "anthropic claude-sonnet 200K 8K no yes\n",
+            "cerebras gemma-4-31b 131K 40K yes yes\n",
+            "cerebras gpt-oss-120b 131K 40K yes no\n",
+            "groq llama-3.3-70b-versatile 128K 32K no no\n",
+        ))
+        .unwrap();
+        let fastest = fastest_model(&models).unwrap();
+        assert_eq!(fastest.id, "cerebras/gpt-oss-120b");
+        assert_eq!(fastest.reasoning.len(), 6);
+
+        let groq_only = parse_models(concat!(
+            "provider model context max-out thinking images\n",
+            "groq llama-3.3-70b-versatile 128K 32K no no\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            fastest_model(&groq_only).unwrap().id,
+            "groq/llama-3.3-70b-versatile"
+        );
+        assert!(fastest_model(&models[..1]).is_none());
     }
 
     #[test]

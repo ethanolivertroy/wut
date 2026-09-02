@@ -20,6 +20,7 @@ struct Fixture {
     cursor: PathBuf,
     codex: PathBuf,
     grok: PathBuf,
+    opencode: PathBuf,
     _serial: MutexGuard<'static, ()>,
 }
 
@@ -36,11 +37,13 @@ impl Fixture {
         let cursor = root.join("fake-cursor");
         let codex = root.join("fake-codex");
         let grok = root.join("fake-grok");
+        let opencode = root.join("fake-opencode");
         Self {
             root,
             cursor,
             codex,
             grok,
+            opencode,
             _serial: serial,
         }
     }
@@ -65,14 +68,29 @@ impl Fixture {
     }
 
     fn configure_grok(&self) {
+        self.configure_fast("grok");
+    }
+
+    fn write_opencode(&self) {
+        fs::write(
+            &self.opencode,
+            format!("#!/bin/sh\nset -eu\n{}\n", successful_opencode()),
+        )
+        .unwrap();
+        fs::set_permissions(&self.opencode, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn configure_fast(&self, agent: &str) {
         write(
             self.root.join("config/wut/config.json"),
-            r#"{
+            &format!(
+                r#"{{
   "version": 2,
-  "agent": "grok",
+  "agent": "{agent}",
   "instructions": "concise",
-  "agents": {"grok": {"model": "fast", "reasoning": null}}
-}"#,
+  "agents": {{"{agent}": {{"model": "fast", "reasoning": null}}}}
+}}"#
+            ),
         );
     }
 
@@ -118,6 +136,7 @@ impl Fixture {
             .env("WUT_CODEX_BIN", &self.codex)
             .env("WUT_CURSOR_BIN", &self.cursor)
             .env("WUT_GROK_BIN", &self.grok)
+            .env("WUT_OPENCODE_BIN", &self.opencode)
             .env("WUT_NO_UPDATE_CHECK", "1");
         command
     }
@@ -209,6 +228,22 @@ case " ${WUT_TEST_GROK_RETIRED:-} " in
 esac
 printf '%s\n' '{"type":"text","data":"hello"}'
 printf '%s\n' '{"type":"end","stop_reason":"stop","session_id":"grok-session-1"}'
+"#
+}
+
+// Fake OpenCode CLI. `opencode --pure models` prints the catalog from
+// WUT_TEST_OPENCODE_MODELS (default: Anthropic plus two Cerebras models).
+// `opencode --pure run ...` logs its arguments and streams a one-word answer.
+fn successful_opencode() -> &'static str {
+    r#"
+if [ "$2" = models ]; then
+    printf '%s\n' "${WUT_TEST_OPENCODE_MODELS:-anthropic/claude-sonnet
+cerebras/gemma-4-31b
+cerebras/gpt-oss-120b}"
+    exit 0
+fi
+printf '%s\n' "$@" >> "$WUT_TEST_ARGS"
+printf '%s\n' '{"type":"text","sessionID":"opencode-session-1","part":{"text":"hello"}}'
 "#
 }
 
@@ -424,6 +459,93 @@ fn grok_fast_alias_resolves_to_the_fastest_model_and_is_cached() {
     let args = fs::read_to_string(&args_path).unwrap();
     assert_eq!(args.matches("--model\ngrok-code-fast-1\n").count(), 2);
     assert!(args.contains("--resume\ngrok-session-1\n"), "{args}");
+}
+
+#[test]
+fn grok_pointed_at_cerebras_prefers_the_cerebras_model() {
+    let fixture = Fixture::new();
+    fixture.write_grok();
+    fixture.configure_grok();
+    let args_path = fixture.root.join("provider-args");
+
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .env(
+            "WUT_TEST_GROK_MODELS",
+            "  * grok-code-fast-1 (default)\n  - gemma-4-31b\n  - gpt-oss-120b",
+        )
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("--model\ngpt-oss-120b\n"), "{args}");
+}
+
+#[test]
+fn opencode_fast_alias_uses_the_connected_cerebras_model() {
+    let fixture = Fixture::new();
+    fixture.write_opencode();
+    fixture.configure_fast("opencode");
+    let args_path = fixture.root.join("provider-args");
+
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "hello\n");
+    let args = fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("--model\ncerebras/gpt-oss-120b\n"), "{args}");
+    assert!(args.contains("--agent\nwut-read-only\n"), "{args}");
+    assert!(!args.contains("\nfast\n"), "{args}");
+    let cached = fs::read_to_string(fixture.root.join("cache/wut/opencode.json")).unwrap();
+    assert!(
+        cached.contains(r#""fast_model": "cerebras/gpt-oss-120b""#),
+        "{cached}"
+    );
+}
+
+#[test]
+fn opencode_fast_alias_without_a_fast_provider_explains_how_to_add_one() {
+    let fixture = Fixture::new();
+    fixture.write_opencode();
+    fixture.configure_fast("opencode");
+    let args_path = fixture.root.join("provider-args");
+
+    let output = fixture
+        .command()
+        .env("WUT_TEST_ARGS", &args_path)
+        .env(
+            "WUT_TEST_OPENCODE_MODELS",
+            "anthropic/claude-sonnet\nopenai/gpt-5.4",
+        )
+        .args(["what", "is", "this?"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("OpenCode has no Cerebras or Groq models connected"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("/connect"), "{stderr}");
+    assert!(!args_path.exists());
+    assert!(!fixture.root.join("cache/wut/opencode.json").exists());
 }
 
 #[test]
