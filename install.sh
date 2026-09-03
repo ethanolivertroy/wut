@@ -115,7 +115,7 @@ valid_version() {
 install_zsh_integration() {
   case "${SHELL:-}" in
     */zsh) ;;
-    *) return ;;
+    *) return 0 ;;
   esac
 
   [ -n "${HOME:-}" ] || error "HOME is not set; could not configure zsh integration"
@@ -157,13 +157,13 @@ install_zsh_integration() {
 }
 
 install_cerebras_key() {
-  [ -z "${CEREBRAS_API_KEY:-}" ] || return
-  [ -n "${HOME:-}" ] || return
+  [ -z "${CEREBRAS_API_KEY:-}" ] || return 0
+  [ -n "${HOME:-}" ] || return 0
 
   config_home="${XDG_CONFIG_HOME:-"$HOME/.config"}"
   credentials_dir="$config_home/wut"
   credentials="$credentials_dir/credentials"
-  [ ! -s "$credentials" ] || return
+  [ ! -s "$credentials" ] || return 0
 
   if [ ! -t 2 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
     printf '\nRerun install.sh from a terminal to securely save your Cerebras API key.\n' >&2
