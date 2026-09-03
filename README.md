@@ -4,6 +4,12 @@ A tiny, fast terminal assistant powered by Cerebras. Ask a quick question, recal
 a command, or let it inspect your current workspace. It cannot edit files or run
 commands.
 
+
+
+https://github.com/user-attachments/assets/2c1c2660-7630-4688-80a2-8beebeacf2c0
+
+
+
 Requires a [Cerebras API key](https://cloud.cerebras.ai/).
 
 ## Install
