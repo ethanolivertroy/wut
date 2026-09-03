@@ -23,13 +23,3 @@ wut -c                    # continue
 wut --sessions            # history
 wut --settings            # configure
 ```
-
-## Architecture
-
-```mermaid
-flowchart LR
-    CLI --> Agent --> Cerebras
-    Agent --> Tools[read / grep / find / ls]
-    Tools --> Workspace
-    Agent --> Sessions
-```
