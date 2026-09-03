@@ -3,11 +3,11 @@ name = "wut"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.88"
-description = "A tiny, read-only coding agent backed by Cerebras"
+description = "A tiny, fast terminal assistant powered by Cerebras"
 license = "MIT"
 repository = "https://github.com/ethanolivertroy/wut"
 readme = "README.md"
-keywords = ["ai", "cli", "coding-agent", "cerebras"]
+keywords = ["ai", "cli", "terminal", "assistant", "cerebras"]
 categories = ["command-line-utilities", "development-tools"]
 publish = false
 

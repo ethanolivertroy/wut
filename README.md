@@ -1,7 +1,8 @@
 # wut
 
-A tiny, read-only coding agent powered by Cerebras. It can inspect and search your
-workspace, but it cannot edit files or run commands.
+A tiny, fast terminal assistant powered by Cerebras. Ask a quick question, recall
+a command, or let it inspect your current workspace. It cannot edit files or run
+commands.
 
 Requires a [Cerebras API key](https://cloud.cerebras.ai/).
 
