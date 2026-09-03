@@ -15,6 +15,9 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanoli
 The installer can save your API key securely, or you can provide it through
 `CEREBRAS_API_KEY`.
 
+Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
+normally with no Exa dependency.
+
 ## Use
 
 ```sh

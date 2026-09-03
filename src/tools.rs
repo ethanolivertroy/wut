@@ -6,7 +6,7 @@ use crate::cerebras::Tool;
 use crate::error::{Error, Result};
 
 pub fn catalog() -> Vec<Tool> {
-    vec![
+    let mut tools = vec![
         Tool {
             name: "read",
             description: "Read a text file. Paths are relative to the workspace. Secret files like .env are never readable.",
@@ -52,13 +52,31 @@ pub fn catalog() -> Vec<Tool> {
                 },
             }),
         },
-    ]
+    ];
+    if exa_api_key().is_some() {
+        tools.push(Tool {
+            name: "web_search",
+            description: "Search the current web. Use for recent information or facts that are not available in the workspace. Results include source URLs that should be cited in the answer.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A focused web search query"},
+                },
+                "required": ["query"],
+            }),
+        });
+    }
+    tools
 }
 
 const MAX_OUTPUT_CHARS: usize = 32 * 1_024;
 const MAX_MATCH_LINES: usize = 200;
 const MAX_FIND_RESULTS: usize = 500;
 const MAX_FILE_BYTES: usize = 512 * 1_024;
+const EXA_API_URL: &str = "https://api.exa.ai/search";
+const EXA_API_KEY: &str = "EXA_API_KEY";
+const WEB_SEARCH_RESULTS: u8 = 5;
+const WEB_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn execute(name: &str, arguments: &Value, root: &Path) -> Result<String> {
     let empty = serde_json::Map::new();
@@ -72,12 +90,90 @@ pub fn execute(name: &str, arguments: &Value, root: &Path) -> Result<String> {
         "grep" => grep(arguments, root),
         "find" => find(arguments, root),
         "ls" => list(arguments, root),
+        "web_search" => web_search(arguments),
         other => Err(Error::new(
             format!("the model called unknown tool '{other}'"),
             "try again; if it keeps happening, report it at \
              https://github.com/ethanolivertroy/wut/issues",
         )),
     }
+}
+
+fn exa_api_key() -> Option<String> {
+    std::env::var(EXA_API_KEY)
+        .ok()
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty())
+}
+
+fn web_search(arguments: &serde_json::Map<String, Value>) -> Result<String> {
+    let query = string_argument(arguments, "query", "web_search", true)?;
+    let key = exa_api_key().ok_or_else(|| {
+        tool_error(
+            "web_search",
+            format!("{EXA_API_KEY} is not set; answer without web search"),
+        )
+    })?;
+    let body = json!({
+        "query": query,
+        "type": "instant",
+        "numResults": WEB_SEARCH_RESULTS,
+        "contents": {"highlights": true},
+    });
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(WEB_SEARCH_TIMEOUT)
+        .timeout_read(WEB_SEARCH_TIMEOUT)
+        .timeout_write(WEB_SEARCH_TIMEOUT)
+        .build();
+    let response = agent
+        .post(EXA_API_URL)
+        .set("x-api-key", &key)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|error| tool_error("web_search", format!("Exa request failed: {error}")))?;
+    let response = response.into_string().map_err(|error| {
+        tool_error(
+            "web_search",
+            format!("could not read Exa response: {error}"),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&response)
+        .map_err(|error| tool_error("web_search", format!("invalid Exa response: {error}")))?;
+    format_search_results(&value)
+}
+
+fn format_search_results(value: &Value) -> Result<String> {
+    let results = value["results"]
+        .as_array()
+        .ok_or_else(|| tool_error("web_search", "Exa returned no results array"))?;
+    if results.is_empty() {
+        return Ok("no web results".to_owned());
+    }
+    let mut output = String::new();
+    for (index, result) in results
+        .iter()
+        .take(usize::from(WEB_SEARCH_RESULTS))
+        .enumerate()
+    {
+        let title = result["title"].as_str().unwrap_or("Untitled");
+        let url = result["url"].as_str().unwrap_or_default();
+        output.push_str(&format!("[{}] {title}\nURL: {url}\n", index + 1));
+        if let Some(date) = result["publishedDate"].as_str() {
+            output.push_str(&format!("Published: {date}\n"));
+        }
+        if let Some(highlights) = result["highlights"].as_array() {
+            let excerpt = highlights
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" … ");
+            if !excerpt.is_empty() {
+                output.push_str(&format!("Excerpt: {excerpt}\n"));
+            }
+        }
+        output.push('\n');
+    }
+    Ok(truncate_output(output.trim_end().to_owned()))
 }
 
 fn tool_error(name: &str, message: impl std::fmt::Display) -> Error {
@@ -363,5 +459,37 @@ fn glob_inner(pattern: &[u8], text: &[u8]) -> bool {
         (Some(b'?'), Some(_)) => glob_inner(&pattern[1..], &text[1..]),
         (Some(a), Some(b)) if a == b => glob_inner(&pattern[1..], &text[1..]),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::format_search_results;
+
+    #[test]
+    fn formats_compact_search_results_with_sources() {
+        let output = format_search_results(&json!({
+            "results": [{
+                "title": "Kubectl reference",
+                "url": "https://example.com/kubectl",
+                "publishedDate": "2026-09-01",
+                "highlights": ["Use kubectl get pods."]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            output,
+            "[1] Kubectl reference\nURL: https://example.com/kubectl\nPublished: 2026-09-01\nExcerpt: Use kubectl get pods."
+        );
+    }
+
+    #[test]
+    fn handles_empty_search_results() {
+        assert_eq!(
+            format_search_results(&json!({"results": []})).unwrap(),
+            "no web results"
+        );
     }
 }
