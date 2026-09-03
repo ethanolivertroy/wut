@@ -8,8 +8,7 @@ Requires a [Cerebras API key](https://cloud.cerebras.ai/).
 ## Install
 
 ```sh
-git clone https://github.com/ethanolivertroy/wut.git
-cd wut && ./install.sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanolivertroy/wut/main/install.sh | sh
 ```
 
 The installer can save your API key securely, or you can provide it through
