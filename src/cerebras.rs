@@ -26,6 +26,13 @@ pub const MODELS: &[Model] = &[
         default_reasoning: Some("none"),
         levels: &["none", "low", "medium", "high"],
     },
+    Model {
+        id: "qwen-3.8-27b",
+        name: "Qwen 3.8 27B",
+        description: "Cerebras public endpoint · configurable reasoning",
+        default_reasoning: Some("high"),
+        levels: &["none", "low", "medium", "high"],
+    },
 ];
 
 pub struct Model {
@@ -236,11 +243,8 @@ pub fn request_body(
     if !tools.is_empty() {
         body["tools"] = json!(tools.iter().map(Tool::to_json).collect::<Vec<_>>());
     }
-    match effort {
-        Some(effort) if effort != "none" => {
-            body["reasoning_effort"] = Value::String(effort.to_owned());
-        }
-        _ => {}
+    if let Some(effort) = effort {
+        body["reasoning_effort"] = Value::String(effort.to_owned());
     }
     body
 }
