@@ -17,6 +17,7 @@ Requires a [Cerebras API key](https://cloud.cerebras.ai/).
 ```sh
 brew install ethanolivertroy/tap/wut   # macOS and Linux, prebuilt binary
 cargo install wut                      # anywhere with Rust 1.88 or newer
+npm install --global wut-cli           # anywhere with Node 18 or newer
 ```
 
 The installer works too, and it can save your API key for you:
