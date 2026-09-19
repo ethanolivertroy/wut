@@ -15,21 +15,18 @@ Requires a [Cerebras API key](https://cloud.cerebras.ai/).
 ## Install
 
 ```sh
+brew install ethanolivertroy/tap/wut   # macOS and Linux, prebuilt binary
+cargo install wut                      # anywhere with Rust 1.88 or newer
+```
+
+The installer works too, and it can save your API key for you:
+
+```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanolivertroy/wut/main/install.sh | sh
 ```
 
-The installer can save your API key securely, or you can provide it through
-`CEREBRAS_API_KEY`.
-
-Package managers install the same prebuilt binary:
-
-```sh
-brew install ethanolivertroy/tap/wut   # macOS and Linux
-npm install --global wut-cli           # anywhere with Node 18+
-```
-
-They do not save an API key: export `CEREBRAS_API_KEY`, or write the key to
-`~/.config/wut/credentials` (mode 600). `cargo install wut` builds from source.
+Package managers do not save an API key: export `CEREBRAS_API_KEY`, or write the
+key to `~/.config/wut/credentials` (mode 600).
 
 Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
 normally with no Exa dependency.
