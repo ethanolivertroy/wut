@@ -188,11 +188,11 @@ pub fn questions() -> Value {
             "type": "choice",
             "instructions": {
                 "question": "How much deliberate thinking does a correct answer to `question` require?",
-                "focus": "Judge how hard it is to produce a correct answer, not how long the answer will be.",
+                "focus": "Judge how hard the answer is to work out once any files or web pages it needs are open, not how long the answer will be or how much reading and searching it takes.",
             },
             "criteria": {
                 "recall": {
-                    "what": "A quick fact, a command, syntax, or a one-step lookup.",
+                    "what": "A quick fact, a command, syntax, or a one-step lookup, including finding, reading, or listing one thing in the project or on the web.",
                     "not_for": "Anything that must be worked out or diagnosed.",
                     "examples": [
                         "how do I exit vim?",
@@ -201,7 +201,7 @@ pub fn questions() -> Value {
                     ],
                 },
                 "explain": {
-                    "what": "A concept, comparison, or how-something-works explanation with a well-known answer.",
+                    "what": "A concept, comparison, or how-something-works explanation with a well-known answer, including describing or summarizing what code, a project, or a page does.",
                     "not_for": "One-line recall, or diagnosing a specific problem.",
                     "examples": [
                         "explain rust lifetimes",
@@ -210,8 +210,8 @@ pub fn questions() -> Value {
                     ],
                 },
                 "investigate": {
-                    "what": "Debugging, diagnosing an error, weighing tradeoffs, or a multi-step problem where the answer must be worked out from evidence.",
-                    "not_for": "Questions with a well-known answer that only needs to be stated.",
+                    "what": "Debugging, diagnosing an error, reviewing code or dependencies for problems, planning a change, weighing tradeoffs, or a multi-step problem where the answer must be worked out from evidence.",
+                    "not_for": "Answers that only need to be looked up, listed, summarized, or stated, even when finding them means opening files or searching the web.",
                     "examples": [
                         "why is this broken?",
                         "why does my build fail with linker errors?",
