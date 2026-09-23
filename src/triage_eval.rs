@@ -729,6 +729,12 @@ mod tests {
         }
     }
 
+    /// The published crate leaves `evals/` out, so the checks on its data
+    /// only run in a checkout.
+    fn in_checkout() -> bool {
+        super::manifest_path("evals").is_dir()
+    }
+
     fn normalize(text: &str) -> String {
         text.to_lowercase()
             .chars()
@@ -758,6 +764,9 @@ mod tests {
 
     #[test]
     fn eval_data_is_well_formed() {
+        if !in_checkout() {
+            return;
+        }
         let cases = load_cases();
         let workspaces = load_workspaces();
         assert!(cases.len() >= 50, "the eval needs at least 50 cases");
@@ -779,6 +788,9 @@ mod tests {
 
     #[test]
     fn eval_cases_do_not_reuse_prompt_examples() {
+        if !in_checkout() {
+            return;
+        }
         let mut found = Vec::new();
         examples(&triage::questions(), &mut found);
         assert!(found.len() > 10);
@@ -793,6 +805,9 @@ mod tests {
 
     #[test]
     fn materialized_workspaces_match_what_triage_sends() {
+        if !in_checkout() {
+            return;
+        }
         let base =
             std::env::temp_dir().join(format!("wut-triage-eval-test-{}", std::process::id()));
         let roots = materialize(&load_workspaces(), &base);
