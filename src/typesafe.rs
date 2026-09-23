@@ -1,7 +1,8 @@
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::error::Error;
 
@@ -9,8 +10,6 @@ pub const ENV_KEY: &str = "TYPESAFE_API_KEY";
 const ENV_BASE_URL: &str = "TYPESAFE_BASE_URL";
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 pub const MODEL: &str = "jev-latest";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_ATTEMPTS: u8 = 2;
 
@@ -18,6 +17,7 @@ const MAX_ATTEMPTS: u8 = 2;
 ///
 /// System One models such as Jev answer typed questions (Noul, Choice, Score)
 /// about a `state`; they do not generate text. See https://docs.typesafe.ai/api.
+#[derive(Clone)]
 pub struct Client {
     api_key: String,
     base_url: String,
@@ -34,7 +34,7 @@ pub struct Failure {
 
 #[derive(Debug)]
 pub struct Answers {
-    answers: Map<String, Value>,
+    response: Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,22 +57,51 @@ impl Client {
         Some(Self { api_key, base_url })
     }
 
+    #[cfg(test)]
+    pub fn for_test(base_url: &str) -> Self {
+        Self {
+            api_key: "test-key".to_owned(),
+            base_url: base_url.to_owned(),
+        }
+    }
+
+    /// Asks `questions` about `state`, waiting at most `budget` for the
+    /// answers, retries included. The request runs on its own thread because
+    /// ureq cannot interrupt a slow DNS lookup; once the budget is spent the
+    /// caller moves on and a late result is dropped.
     pub fn system_one(
+        &self,
+        state: Value,
+        questions: Value,
+        budget: Duration,
+    ) -> std::result::Result<Answers, Failure> {
+        let deadline = Instant::now() + budget;
+        let client = self.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(client.send(&state, &questions, deadline));
+        });
+        receiver
+            .recv_timeout(budget)
+            .unwrap_or_else(|_| Err(out_of_time(budget)))
+    }
+
+    fn send(
         &self,
         state: &Value,
         questions: &Value,
+        deadline: Instant,
     ) -> std::result::Result<Answers, Failure> {
         let body = request_body(state, questions).to_string();
         let url = format!("{}/v1/systemone", self.base_url);
         let agent = ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(IO_TIMEOUT)
-            .timeout_write(IO_TIMEOUT)
+            .timeout_connect(deadline.saturating_duration_since(Instant::now()))
             .build();
         let mut attempt = 1;
         loop {
             let result = agent
                 .post(&url)
+                .timeout(deadline.saturating_duration_since(Instant::now()))
                 .set("Authorization", &format!("Bearer {}", self.api_key))
                 .set("Content-Type", "application/json")
                 .send_string(&body);
@@ -87,9 +116,16 @@ impl Client {
                     })?;
                     return parse_response(&text);
                 }
-                // 429 and 529 ask for a retry after a short backoff.
-                Err(ureq::Error::Status(429 | 529, _)) if attempt < MAX_ATTEMPTS => {
-                    thread::sleep(RETRY_DELAY * u32::from(attempt));
+                // 429 and 529 ask for a retry after a short backoff, which is
+                // only worth waiting for when the budget still covers it.
+                Err(ureq::Error::Status(status @ (429 | 529), response))
+                    if attempt < MAX_ATTEMPTS =>
+                {
+                    let delay = retry_delay(&response, attempt);
+                    if Instant::now() + delay >= deadline {
+                        return Err(request_failure(ureq::Error::Status(status, response)));
+                    }
+                    thread::sleep(delay);
                     attempt += 1;
                 }
                 Err(error) => return Err(request_failure(error)),
@@ -107,48 +143,79 @@ pub fn request_body(state: &Value, questions: &Value) -> Value {
 }
 
 fn parse_response(text: &str) -> std::result::Result<Answers, Failure> {
-    let value: Value = serde_json::from_str(text).map_err(|error| Failure {
+    let response: Value = serde_json::from_str(text).map_err(|error| Failure {
         error: Error::new(
             format!("TypeSafe returned an invalid response: {error}"),
             "try again shortly",
         ),
         permanent: false,
     })?;
-    let answers = value
-        .get("answers")
-        .and_then(Value::as_object)
-        .cloned()
-        .ok_or_else(|| Failure {
+    if !response["answers"].is_object() {
+        return Err(Failure {
             error: Error::new("TypeSafe returned no answers", "try again shortly"),
             permanent: false,
-        })?;
-    Ok(Answers { answers })
+        });
+    }
+    Ok(Answers { response })
 }
 
 impl Answers {
     #[cfg(test)]
-    pub fn from_map(answers: Map<String, Value>) -> Self {
-        Self { answers }
+    pub fn from_map(answers: serde_json::Map<String, Value>) -> Self {
+        Self {
+            response: json!({ "answers": answers }),
+        }
+    }
+
+    /// The whole response body, including the versioned `model` that
+    /// answered and the token `usage`.
+    #[cfg(test)]
+    pub fn response(&self) -> &Value {
+        &self.response
     }
 
     /// The probability that the answer to a Noul question is yes.
     pub fn noul(&self, id: &str) -> Option<f64> {
-        let answer = self.answers.get(id)?;
-        if answer["type"] != "noul" {
-            return None;
-        }
-        answer["noul"].as_f64()
+        self.answer(id, "noul")?["noul"].as_f64()
     }
 
     pub fn choice(&self, id: &str) -> Option<Choice> {
-        let answer = self.answers.get(id)?;
-        if answer["type"] != "choice" {
-            return None;
-        }
+        let answer = self.answer(id, "choice")?;
         Some(Choice {
             choice: answer["choice"].as_str()?.to_owned(),
             confidence: answer["confidence"].as_f64()?,
         })
+    }
+
+    fn answer(&self, id: &str, kind: &str) -> Option<&Value> {
+        self.response["answers"]
+            .get(id)
+            .filter(|answer| answer["type"] == kind)
+    }
+}
+
+/// The wait before retrying, honoring `retry-after-ms` or `retry-after`
+/// (in seconds) when the response asks for longer than the backoff.
+fn retry_delay(response: &ureq::Response, attempt: u8) -> Duration {
+    let backoff = RETRY_DELAY * u32::from(attempt);
+    let seconds = |name: &str, scale: f64| {
+        response
+            .header(name)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .and_then(|value| Duration::try_from_secs_f64(value / scale).ok())
+    };
+    seconds("retry-after-ms", 1_000.0)
+        .or_else(|| seconds("retry-after", 1.0))
+        .map_or(backoff, |requested| requested.max(backoff))
+}
+
+fn out_of_time(budget: Duration) -> Failure {
+    Failure {
+        error: Error::new(
+            format!("TypeSafe did not answer within {budget:?}"),
+            "check your connection and try again",
+        ),
+        permanent: false,
     }
 }
 
@@ -204,10 +271,102 @@ fn request_failure(error: ureq::Error) -> Failure {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use serde_json::json;
 
-    use super::{Choice, parse_response, request_body};
+    use super::{Choice, Client, parse_response, request_body};
+
+    /// A local stand-in for the System One endpoint. Each connection gets the
+    /// next scripted response after its delay; requests are passed back raw.
+    pub struct Server {
+        pub url: String,
+        pub requests: Receiver<String>,
+        connections: Arc<AtomicUsize>,
+    }
+
+    impl Server {
+        pub fn start(script: Vec<(Duration, String)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let connections = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&connections);
+            let (sender, requests) = mpsc::channel();
+            thread::spawn(move || {
+                for (delay, response) in script {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let _ = sender.send(read_request(&mut stream));
+                    thread::sleep(delay);
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self {
+                url,
+                requests,
+                connections,
+            }
+        }
+
+        pub fn connections(&self) -> usize {
+            self.connections.load(Ordering::SeqCst)
+        }
+    }
+
+    pub fn http(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn read_request(stream: &mut TcpStream) -> String {
+        let mut data = Vec::new();
+        let mut buffer = [0; 4096];
+        while let Ok(read) = stream.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            data.extend_from_slice(&buffer[..read]);
+            let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&data[..end]).to_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if data.len() >= end + 4 + length {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&data).into_owned()
+    }
+
+    const ANSWERS: &str = r#"{
+        "model": "jev-1.13.0",
+        "answers": {"needs_web": {"type": "noul", "noul": 0.1}},
+        "usage": {"input_tokens": 300, "output_tokens": 20}
+    }"#;
+
+    fn ask(server: &Server, budget: Duration) -> Result<super::Answers, super::Failure> {
+        Client::for_test(&server.url).system_one(
+            json!({"question": "q"}),
+            json!({"needs_web": {"type": "noul", "instructions": "Needs the web?"}}),
+            budget,
+        )
+    }
 
     #[test]
     fn builds_a_system_one_request() {
@@ -249,6 +408,7 @@ mod tests {
         assert_eq!(answers.noul("department"), None);
         assert_eq!(answers.choice("is_urgent"), None);
         assert_eq!(answers.noul("missing"), None);
+        assert_eq!(answers.response()["model"], "jev-1.13.0");
     }
 
     #[test]
@@ -256,5 +416,82 @@ mod tests {
         let failure = parse_response(r#"{"model": "jev-1.13.0"}"#).unwrap_err();
         assert!(!failure.permanent);
         assert!(parse_response("not json").is_err());
+    }
+
+    #[test]
+    fn posts_questions_to_the_system_one_endpoint() {
+        let server = Server::start(vec![(Duration::ZERO, http("200 OK", "", ANSWERS))]);
+        let answers = ask(&server, Duration::from_secs(5)).unwrap();
+        assert_eq!(answers.noul("needs_web"), Some(0.1));
+
+        let request = server.requests.recv().unwrap();
+        assert!(request.starts_with("POST /v1/systemone HTTP/1.1"));
+        let lowered = request.to_lowercase();
+        assert!(lowered.contains("authorization: bearer test-key"));
+        assert!(lowered.contains("content-type: application/json"));
+        let body = &request[request.find("\r\n\r\n").unwrap() + 4..];
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["model"], "jev-latest");
+        assert_eq!(body["questions"]["needs_web"]["type"], "noul");
+    }
+
+    #[test]
+    fn retries_a_rate_limit_within_the_budget() {
+        let server = Server::start(vec![
+            (
+                Duration::ZERO,
+                http("429 Too Many Requests", "Retry-After-Ms: 20\r\n", "{}"),
+            ),
+            (Duration::ZERO, http("200 OK", "", ANSWERS)),
+        ]);
+        let answers = ask(&server, Duration::from_secs(5)).unwrap();
+        assert_eq!(answers.noul("needs_web"), Some(0.1));
+        assert_eq!(server.connections(), 2);
+    }
+
+    #[test]
+    fn skips_a_retry_the_budget_cannot_cover() {
+        let server = Server::start(vec![
+            (
+                Duration::ZERO,
+                http("529 Overloaded", "Retry-After: 30\r\n", "{}"),
+            ),
+            (Duration::ZERO, http("200 OK", "", ANSWERS)),
+        ]);
+        let started = Instant::now();
+        let failure = ask(&server, Duration::from_secs(2)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!failure.permanent);
+        assert!(failure.error.message().contains("HTTP 529"));
+        assert_eq!(server.connections(), 1);
+    }
+
+    #[test]
+    fn gives_up_once_the_budget_is_spent() {
+        let server = Server::start(vec![(Duration::from_secs(5), http("200 OK", "", ANSWERS))]);
+        let started = Instant::now();
+        let failure = ask(&server, Duration::from_millis(200)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!failure.permanent);
+        assert!(
+            failure
+                .error
+                .message()
+                .contains("did not answer within 200ms")
+        );
+    }
+
+    #[test]
+    fn rejected_keys_are_permanent() {
+        let server = Server::start(vec![(
+            Duration::ZERO,
+            http("401 Unauthorized", "", r#"{"detail": "Invalid API key"}"#),
+        )]);
+        let failure = ask(&server, Duration::from_secs(5)).unwrap_err();
+        assert!(failure.permanent);
+        assert_eq!(
+            failure.error.message(),
+            "TypeSafe returned HTTP 401: Invalid API key"
+        );
     }
 }

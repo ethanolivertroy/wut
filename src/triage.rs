@@ -5,6 +5,7 @@
 //! owns every decision here; Jev only supplies the probabilities.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -13,6 +14,10 @@ use crate::typesafe::{Answers, Client, Failure};
 
 /// Reasoning setting that lets triage pick the effort level per question.
 pub const AUTO_REASONING: &str = "auto";
+
+/// The longest triage may hold up an answer, retries included. Jev usually
+/// answers in a few hundred milliseconds; past this wut answers without a plan.
+pub const BUDGET: Duration = Duration::from_secs(2);
 
 const RECENT_EXCHANGES: usize = 2;
 const EXCHANGE_CHARS: usize = 300;
@@ -91,7 +96,7 @@ pub fn plan(
     root: &Path,
 ) -> std::result::Result<Plan, Failure> {
     let state = state(question, exchanges, root);
-    let answers = client.system_one(&state, &questions())?;
+    let answers = client.system_one(state, questions(), BUDGET)?;
     Ok(Plan::from_answers(&answers))
 }
 
@@ -250,11 +255,13 @@ fn clip(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
-    use super::{Effort, Plan, state};
-    use crate::typesafe::Answers;
+    use super::{BUDGET, Effort, Plan, plan, state};
+    use crate::typesafe::tests::{Server, http};
+    use crate::typesafe::{Answers, Client};
 
     fn answers(value: serde_json::Value) -> Answers {
         Answers::from_map(value.as_object().unwrap().clone())
@@ -336,5 +343,19 @@ mod tests {
     fn state_omits_conversation_when_empty() {
         let state = state("how do I exit vim?", &[], Path::new("/tmp"));
         assert!(state.get("conversation").is_none());
+    }
+
+    #[test]
+    fn a_stalled_typesafe_costs_at_most_the_budget() {
+        let server = Server::start(vec![(
+            Duration::from_secs(30),
+            http("200 OK", "", r#"{"answers": {}}"#),
+        )]);
+        let started = Instant::now();
+        let failure =
+            plan(&Client::for_test(&server.url), "q", &[], Path::new("/tmp")).unwrap_err();
+        let waited = started.elapsed();
+        assert!(waited >= BUDGET && waited < BUDGET + Duration::from_millis(500));
+        assert!(!failure.permanent, "a slow answer must not disable triage");
     }
 }
