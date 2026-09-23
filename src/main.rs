@@ -16,6 +16,8 @@ mod storage;
 mod terminal;
 mod tools;
 mod triage;
+#[cfg(test)]
+mod triage_eval;
 mod typesafe;
 mod update_check;
 mod upgrade;

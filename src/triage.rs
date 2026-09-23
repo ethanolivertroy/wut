@@ -24,15 +24,16 @@ const EXCHANGE_CHARS: usize = 300;
 const QUESTION_CHARS: usize = 2_000;
 const MAX_ENTRIES: usize = 40;
 
-// Starting points, not tuned rules: evaluate them on real questions. Tools are
-// only dropped when Jev is confident they are unnecessary, because keeping an
-// unused tool costs a few tokens while removing a needed one costs the answer.
-const TOOL_UNNEEDED_MAX: f64 = 0.2;
-const MIN_EFFORT_CONFIDENCE: f64 = 0.5;
+// Starting points, not tuned rules: evaluate them on real questions with the
+// eval in evals/triage. Tools are only dropped when Jev is confident they are
+// unnecessary, because keeping an unused tool costs a few tokens while
+// removing a needed one costs the answer.
+pub const TOOL_UNNEEDED_MAX: f64 = 0.2;
+pub const MIN_EFFORT_CONFIDENCE: f64 = 0.5;
 
-const NEEDS_WORKSPACE: &str = "needs_workspace_files";
-const NEEDS_WEB: &str = "needs_current_web_information";
-const THINKING: &str = "thinking_required";
+pub const NEEDS_WORKSPACE: &str = "needs_workspace_files";
+pub const NEEDS_WEB: &str = "needs_current_web_information";
+pub const THINKING: &str = "thinking_required";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effort {
@@ -264,7 +265,7 @@ mod tests {
     use crate::typesafe::{Answers, Client};
 
     fn answers(value: serde_json::Value) -> Answers {
-        Answers::from_map(value.as_object().unwrap().clone())
+        Answers::from_response(json!({ "answers": value }))
     }
 
     #[test]

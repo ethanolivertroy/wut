@@ -161,10 +161,8 @@ fn parse_response(text: &str) -> std::result::Result<Answers, Failure> {
 
 impl Answers {
     #[cfg(test)]
-    pub fn from_map(answers: serde_json::Map<String, Value>) -> Self {
-        Self {
-            response: json!({ "answers": answers }),
-        }
+    pub fn from_response(response: Value) -> Self {
+        Self { response }
     }
 
     /// The whole response body, including the versioned `model` that
