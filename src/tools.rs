@@ -22,6 +22,31 @@ impl Default for ToolSet {
     }
 }
 
+impl ToolSet {
+    /// The groups that offer any of the named tools.
+    pub fn offering<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut set = Self {
+            workspace: false,
+            web_search: false,
+        };
+        for name in names {
+            if name == "web_search" {
+                set.web_search = true;
+            } else if workspace_tools().iter().any(|tool| tool.name == name) {
+                set.workspace = true;
+            }
+        }
+        set
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            workspace: self.workspace || other.workspace,
+            web_search: self.web_search || other.web_search,
+        }
+    }
+}
+
 pub fn catalog(set: ToolSet) -> Vec<Tool> {
     let mut tools = Vec::new();
     if set.workspace {
@@ -522,6 +547,36 @@ mod tests {
             })
             .contains(&"web_search")
         );
+    }
+
+    #[test]
+    fn tool_names_map_to_their_groups() {
+        let none = ToolSet {
+            workspace: false,
+            web_search: false,
+        };
+        assert_eq!(ToolSet::offering([]), none);
+        assert_eq!(ToolSet::offering(["made_up"]), none);
+        for name in ["read", "grep", "find", "ls"] {
+            assert_eq!(
+                ToolSet::offering([name]),
+                ToolSet {
+                    workspace: true,
+                    web_search: false,
+                }
+            );
+        }
+        let web = ToolSet::offering(["web_search"]);
+        assert_eq!(
+            web,
+            ToolSet {
+                workspace: false,
+                web_search: true,
+            }
+        );
+        assert_eq!(ToolSet::offering(["ls", "web_search"]), ToolSet::default());
+        assert_eq!(none.union(web), web);
+        assert_eq!(web.union(ToolSet::default()), ToolSet::default());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::cerebras::{self, Client, Message, Outcome, Role};
 use crate::error::{Error, Result};
 use crate::instructions::Instructions;
 use crate::state::Turn;
-use crate::tools;
+use crate::tools::{self, ToolSet};
 use crate::triage::{self, Plan};
 use crate::typesafe;
 
@@ -85,10 +85,10 @@ impl Agent {
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<String> {
         let plan = self.plan(question, root);
-        let tools = tools::catalog(plan.tools);
         let effort = self.turn_effort(plan.effort);
         self.messages.push(Message::text(Role::User, question));
         for _ in 0..MAX_TURNS {
+            let tools = tools::catalog(plan.tools.union(tools_in_history(&self.messages)));
             let outcome = self.client.stream(
                 &self.messages,
                 &tools,
@@ -169,6 +169,17 @@ fn parse_arguments(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
 }
 
+/// Tool groups the conversation has already called. They stay on offer so a
+/// request never carries a call to a tool it does not define.
+fn tools_in_history(messages: &[Message]) -> ToolSet {
+    ToolSet::offering(
+        messages
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .map(|call| call.name.as_str()),
+    )
+}
+
 /// The last `limit` completed question/answer pairs, skipping tool traffic.
 fn recent_exchanges(messages: &[Message], limit: usize) -> Vec<(String, String)> {
     let mut exchanges = Vec::new();
@@ -191,8 +202,51 @@ fn recent_exchanges(messages: &[Message], limit: usize) -> Vec<(String, String)>
 
 #[cfg(test)]
 mod tests {
-    use super::recent_exchanges;
+    use super::{recent_exchanges, tools_in_history};
     use crate::cerebras::{Message, Role, ToolCall};
+    use crate::tools::ToolSet;
+
+    fn calling(names: &[&str]) -> Message {
+        let mut message = Message::text(Role::Assistant, "");
+        for (index, name) in names.iter().enumerate() {
+            message.tool_calls.push(ToolCall {
+                id: format!("call_{index}"),
+                name: (*name).to_owned(),
+                arguments: "{}".to_owned(),
+            });
+        }
+        message
+    }
+
+    #[test]
+    fn keeps_offering_tools_the_conversation_already_called() {
+        let plain = vec![
+            Message::text(Role::User, "how do I exit vim?"),
+            Message::text(Role::Assistant, "press esc, then type :q"),
+        ];
+        assert_eq!(
+            tools_in_history(&plain),
+            ToolSet {
+                workspace: false,
+                web_search: false,
+            }
+        );
+
+        let mut searched = plain.clone();
+        searched.push(Message::text(Role::User, "where is the key read?"));
+        searched.push(calling(&["grep"]));
+        searched.push(Message::tool_result("call_0", "src/cerebras.rs:12"));
+        assert_eq!(
+            tools_in_history(&searched),
+            ToolSet {
+                workspace: true,
+                web_search: false,
+            }
+        );
+
+        searched.push(calling(&["web_search", "read"]));
+        assert_eq!(tools_in_history(&searched), ToolSet::default());
+    }
 
     #[test]
     fn collects_completed_exchanges_without_tool_traffic() {
