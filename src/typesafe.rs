@@ -9,7 +9,10 @@ use crate::error::Error;
 pub const ENV_KEY: &str = "TYPESAFE_API_KEY";
 const ENV_BASE_URL: &str = "TYPESAFE_BASE_URL";
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
-pub const MODEL: &str = "jev-latest";
+/// Pinned because the triage thresholds were checked against this version,
+/// while `jev-latest` moves with each release. Re-run evals/triage before
+/// changing it.
+pub const MODEL: &str = "jev-1.13.0";
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_ATTEMPTS: u8 = 2;
 
@@ -382,7 +385,7 @@ pub mod tests {
             &json!({"question": "how do I exit vim?"}),
             &json!({"urgent": {"type": "noul", "instructions": "Is it urgent?"}}),
         );
-        assert_eq!(body["model"], "jev-latest");
+        assert_eq!(body["model"], "jev-1.13.0");
         assert_eq!(body["state"]["question"], "how do I exit vim?");
         assert_eq!(body["questions"]["urgent"]["type"], "noul");
     }
@@ -439,7 +442,7 @@ pub mod tests {
         assert!(lowered.contains("content-type: application/json"));
         let body = &request[request.find("\r\n\r\n").unwrap() + 4..];
         let body: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["model"], "jev-latest");
+        assert_eq!(body["model"], "jev-1.13.0");
         assert_eq!(body["questions"]["needs_web"]["type"], "noul");
     }
 

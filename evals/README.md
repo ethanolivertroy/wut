@@ -53,10 +53,11 @@ No false drops on these cases is necessary, not sufficient. Prefer a threshold
 with some margin below the lowest probability Jev gave a needed tool, and add a
 case whenever a real question gets triaged badly.
 
-Each response's `model` field names the versioned model that answered.
-`jev-latest` moves when TypeSafe ships a release, so once the thresholds are
-tuned, pin that version in `src/typesafe.rs` and re-run the eval before moving
-to a newer one.
+Each response's `model` field names the versioned model that answered. wut pins
+`MODEL` in `src/typesafe.rs` to the version the thresholds were checked
+against, because `jev-latest` moves when TypeSafe ships a release. To try a
+newer Jev, change `MODEL`, re-run the eval, and compare it with the last run
+before keeping it.
 
 ## Cases
 

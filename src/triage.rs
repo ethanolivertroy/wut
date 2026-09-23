@@ -24,10 +24,10 @@ const EXCHANGE_CHARS: usize = 300;
 const QUESTION_CHARS: usize = 2_000;
 const MAX_ENTRIES: usize = 40;
 
-// Starting points, not tuned rules: evaluate them on real questions with the
-// eval in evals/triage. Tools are only dropped when Jev is confident they are
-// unnecessary, because keeping an unused tool costs a few tokens while
-// removing a needed one costs the answer.
+// Checked against `typesafe::MODEL` with the eval in evals/triage; re-run it
+// before changing these, the questions, or the model. Tools are only dropped
+// when Jev is confident they are unnecessary, because keeping an unused tool
+// costs a few tokens while removing a needed one costs the answer.
 pub const TOOL_UNNEEDED_MAX: f64 = 0.2;
 pub const MIN_EFFORT_CONFIDENCE: f64 = 0.5;
 
