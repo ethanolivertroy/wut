@@ -66,24 +66,17 @@ impl Client {
     }
 
     /// Asks `questions` about `state`, waiting at most `budget` for the
-    /// answers, retries included. The request runs on its own thread because
-    /// ureq cannot interrupt a slow DNS lookup; once the budget is spent the
-    /// caller moves on and a late result is dropped.
+    /// answers, retries included.
     pub fn system_one(
         &self,
         state: Value,
         questions: Value,
         budget: Duration,
     ) -> std::result::Result<Answers, Failure> {
-        let deadline = Instant::now() + budget;
         let client = self.clone();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = sender.send(client.send(&state, &questions, deadline));
-        });
-        receiver
-            .recv_timeout(budget)
-            .unwrap_or_else(|_| Err(out_of_time(budget)))
+        within(budget, move |deadline| {
+            client.send(&state, &questions, deadline)
+        })
     }
 
     fn send(
@@ -132,6 +125,23 @@ impl Client {
             }
         }
     }
+}
+
+/// Runs `work` on its own thread and waits for it until `budget` has passed.
+/// ureq cannot interrupt a slow DNS lookup, so only a separate thread makes
+/// the budget a hard limit; a result that arrives later is dropped.
+fn within<T: Send + 'static>(
+    budget: Duration,
+    work: impl FnOnce(Instant) -> std::result::Result<T, Failure> + Send + 'static,
+) -> std::result::Result<T, Failure> {
+    let deadline = Instant::now() + budget;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sender.send(work(deadline));
+    });
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or_else(|_| Err(out_of_time(budget)))
 }
 
 pub fn request_body(state: &Value, questions: &Value) -> Value {
@@ -280,7 +290,7 @@ pub mod tests {
 
     use serde_json::json;
 
-    use super::{Choice, Client, parse_response, request_body};
+    use super::{Choice, Client, parse_response, request_body, within};
 
     /// A local stand-in for the System One endpoint. Each connection gets the
     /// next scripted response after its delay; requests are passed back raw.
@@ -465,18 +475,28 @@ pub mod tests {
     }
 
     #[test]
-    fn gives_up_once_the_budget_is_spent() {
+    fn stops_waiting_once_the_budget_is_spent() {
+        let started = Instant::now();
+        let failure = within(Duration::from_millis(100), |_| {
+            thread::sleep(Duration::from_secs(5));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!failure.permanent);
+        assert_eq!(
+            failure.error.message(),
+            "TypeSafe did not answer within 100ms"
+        );
+    }
+
+    #[test]
+    fn abandons_a_stalled_server_within_the_budget() {
         let server = Server::start(vec![(Duration::from_secs(5), http("200 OK", "", ANSWERS))]);
         let started = Instant::now();
         let failure = ask(&server, Duration::from_millis(200)).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(!failure.permanent);
-        assert!(
-            failure
-                .error
-                .message()
-                .contains("did not answer within 200ms")
-        );
+        assert!(!failure.permanent, "a slow answer must not disable triage");
     }
 
     #[test]

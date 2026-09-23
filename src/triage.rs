@@ -356,7 +356,8 @@ mod tests {
         let failure =
             plan(&Client::for_test(&server.url), "q", &[], Path::new("/tmp")).unwrap_err();
         let waited = started.elapsed();
-        assert!(waited >= BUDGET && waited < BUDGET + Duration::from_millis(500));
+        let slack = Duration::from_millis(250);
+        assert!(waited > BUDGET - slack && waited < BUDGET + slack);
         assert!(!failure.permanent, "a slow answer must not disable triage");
     }
 }
