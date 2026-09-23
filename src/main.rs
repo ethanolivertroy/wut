@@ -15,6 +15,10 @@ mod state;
 mod storage;
 mod terminal;
 mod tools;
+mod triage;
+#[cfg(test)]
+mod triage_eval;
+mod typesafe;
 mod update_check;
 mod upgrade;
 
@@ -328,9 +332,18 @@ fn run_turn(
         output.push(delta)
     });
     spinner.stop();
-    let answer = answer?;
-    output.finish(&answer)?;
-    Ok(answer)
+    let notice = agent.take_notice();
+    let result = answer.and_then(|answer| {
+        output.finish(&answer)?;
+        Ok(answer)
+    });
+    if let Some(notice) = notice {
+        if decorate && result.is_ok() {
+            eprintln!();
+        }
+        notice.print();
+    }
+    result
 }
 
 fn record_turn(

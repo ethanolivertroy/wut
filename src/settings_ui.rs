@@ -11,6 +11,8 @@ use crate::config::{Config, ResponseColor};
 use crate::error::{Error, Result};
 use crate::instructions::Instructions;
 use crate::select::{self, Choice, Item};
+use crate::triage::AUTO_REASONING;
+use crate::typesafe;
 
 pub struct Cache;
 
@@ -246,14 +248,14 @@ fn select_model(settings: &mut impl EditableSettings) -> Result<()> {
 fn select_reasoning(settings: &mut impl EditableSettings) -> Result<()> {
     let model = cerebras::find_model(cerebras::resolve_model(settings.model()))
         .ok_or_else(|| Error::new("no model is selected", "choose a model and try again"))?;
-    let items: Vec<_> = model
-        .levels
+    let options = reasoning_options(model);
+    let items: Vec<_> = options
         .iter()
         .map(|level| Item::new(title_case(level), reasoning_description(level)))
         .collect();
     let selected = settings
         .reasoning()
-        .and_then(|current| model.levels.iter().position(|level| *level == current))
+        .and_then(|current| options.iter().position(|level| *level == current))
         .unwrap_or(0);
     let Choice::Selected(index) = select::choose(
         "Reasoning",
@@ -264,8 +266,14 @@ fn select_reasoning(settings: &mut impl EditableSettings) -> Result<()> {
     else {
         return Ok(());
     };
-    settings.set_reasoning(Some(model.levels[index].to_owned()));
+    settings.set_reasoning(Some(options[index].to_owned()));
     settings.save()
+}
+
+fn reasoning_options(model: &Model) -> Vec<&'static str> {
+    let mut options = model.levels.to_vec();
+    options.push(AUTO_REASONING);
+    options
 }
 
 fn select_response_color(config: &mut Config) -> Result<()> {
@@ -291,16 +299,22 @@ fn select_response_color(config: &mut Config) -> Result<()> {
 }
 
 fn supports_reasoning(model: &Model, reasoning: Option<&str>) -> bool {
-    reasoning.is_none() || model.levels.iter().any(|level| Some(*level) == reasoning)
+    reasoning.is_none()
+        || reasoning == Some(AUTO_REASONING)
+        || model.levels.iter().any(|level| Some(*level) == reasoning)
 }
 
-fn reasoning_description(level: &str) -> &'static str {
+fn reasoning_description(level: &str) -> String {
     match level {
-        "none" => "No extra thinking",
-        "low" => "Low reasoning",
-        "medium" => "Balanced reasoning",
-        "high" => "Deep reasoning",
-        _ => "",
+        "none" => "No extra thinking".to_owned(),
+        "low" => "Low reasoning".to_owned(),
+        "medium" => "Balanced reasoning".to_owned(),
+        "high" => "Deep reasoning".to_owned(),
+        AUTO_REASONING => format!(
+            "TypeSafe Jev picks a level per question (needs {})",
+            typesafe::ENV_KEY
+        ),
+        _ => String::new(),
     }
 }
 

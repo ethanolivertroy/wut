@@ -5,8 +5,71 @@ use serde_json::{Value, json};
 use crate::cerebras::Tool;
 use crate::error::{Error, Result};
 
-pub fn catalog() -> Vec<Tool> {
-    let mut tools = vec![
+/// Which tools a turn offers the model. Everything is on by default; triage
+/// switches groups off when a question clearly does not need them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolSet {
+    pub workspace: bool,
+    pub web_search: bool,
+}
+
+impl Default for ToolSet {
+    fn default() -> Self {
+        Self {
+            workspace: true,
+            web_search: true,
+        }
+    }
+}
+
+impl ToolSet {
+    /// The groups that offer any of the named tools.
+    pub fn offering<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut set = Self {
+            workspace: false,
+            web_search: false,
+        };
+        for name in names {
+            if name == "web_search" {
+                set.web_search = true;
+            } else if workspace_tools().iter().any(|tool| tool.name == name) {
+                set.workspace = true;
+            }
+        }
+        set
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            workspace: self.workspace || other.workspace,
+            web_search: self.web_search || other.web_search,
+        }
+    }
+}
+
+pub fn catalog(set: ToolSet) -> Vec<Tool> {
+    let mut tools = Vec::new();
+    if set.workspace {
+        tools.extend(workspace_tools());
+    }
+    if set.web_search && exa_api_key().is_some() {
+        tools.push(Tool {
+            name: "web_search",
+            description: "Search the current web. Use for recent information or facts that are not available in the workspace. Results include source URLs that should be cited in the answer.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A focused web search query"},
+                },
+                "required": ["query"],
+            }),
+        });
+    }
+    tools
+}
+
+fn workspace_tools() -> Vec<Tool> {
+    vec![
         Tool {
             name: "read",
             description: "Read a text file. Paths are relative to the workspace. Secret files like .env are never readable.",
@@ -52,21 +115,7 @@ pub fn catalog() -> Vec<Tool> {
                 },
             }),
         },
-    ];
-    if exa_api_key().is_some() {
-        tools.push(Tool {
-            name: "web_search",
-            description: "Search the current web. Use for recent information or facts that are not available in the workspace. Results include source URLs that should be cited in the answer.",
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "A focused web search query"},
-                },
-                "required": ["query"],
-            }),
-        });
-    }
-    tools
+    ]
 }
 
 const MAX_OUTPUT_CHARS: usize = 32 * 1_024;
@@ -434,7 +483,7 @@ fn truncate_output(mut text: String) -> String {
     text
 }
 
-fn char_floor(text: &str, limit: usize) -> usize {
+pub(crate) fn char_floor(text: &str, limit: usize) -> usize {
     let mut end = limit.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -466,7 +515,69 @@ fn glob_inner(pattern: &[u8], text: &[u8]) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::format_search_results;
+    use super::{ToolSet, catalog, format_search_results};
+
+    #[test]
+    fn catalog_follows_the_tool_set() {
+        let names = |set: ToolSet| {
+            catalog(set)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(ToolSet::default())
+                .iter()
+                .filter(|name| **name != "web_search")
+                .copied()
+                .collect::<Vec<_>>(),
+            ["read", "grep", "find", "ls"]
+        );
+        assert!(
+            names(ToolSet {
+                workspace: false,
+                web_search: false,
+            })
+            .is_empty()
+        );
+        assert!(
+            !names(ToolSet {
+                workspace: true,
+                web_search: false,
+            })
+            .contains(&"web_search")
+        );
+    }
+
+    #[test]
+    fn tool_names_map_to_their_groups() {
+        let none = ToolSet {
+            workspace: false,
+            web_search: false,
+        };
+        assert_eq!(ToolSet::offering([]), none);
+        assert_eq!(ToolSet::offering(["made_up"]), none);
+        for name in ["read", "grep", "find", "ls"] {
+            assert_eq!(
+                ToolSet::offering([name]),
+                ToolSet {
+                    workspace: true,
+                    web_search: false,
+                }
+            );
+        }
+        let web = ToolSet::offering(["web_search"]);
+        assert_eq!(
+            web,
+            ToolSet {
+                workspace: false,
+                web_search: true,
+            }
+        );
+        assert_eq!(ToolSet::offering(["ls", "web_search"]), ToolSet::default());
+        assert_eq!(none.union(web), web);
+        assert_eq!(web.union(ToolSet::default()), ToolSet::default());
+    }
 
     #[test]
     fn formats_compact_search_results_with_sources() {

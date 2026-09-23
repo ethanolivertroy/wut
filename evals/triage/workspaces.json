@@ -1,0 +1,22 @@
+{
+  "wut": {
+    "folder": "wut",
+    "entries": [".agents/", ".github/", "assets/", "Cargo.lock", "Cargo.toml", "install.sh", "LICENSE", "README.md", "skills-lock.json", "src/"]
+  },
+  "webapp": {
+    "folder": "storefront",
+    "entries": [".env", ".gitignore", "index.html", "node_modules/", "package-lock.json", "package.json", "public/", "README.md", "src/", "tsconfig.json", "vite.config.ts"]
+  },
+  "pyproject": {
+    "folder": "billing-api",
+    "entries": [".venv/", "app/", "Makefile", "pyproject.toml", "README.md", "requirements.txt", "tests/"]
+  },
+  "home": {
+    "folder": "ethan",
+    "entries": [".bashrc", ".config/", ".gitconfig", ".ssh/", ".zshrc", "Desktop/", "Documents/", "Downloads/", "Music/", "Pictures/", "projects/"]
+  },
+  "scratch": {
+    "folder": "tmp",
+    "entries": []
+  }
+}

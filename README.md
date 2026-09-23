@@ -32,6 +32,17 @@ key to `~/.config/wut/credentials` (mode 600).
 Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
 normally with no Exa dependency.
 
+Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
+Jev model triage each question before it reaches Cerebras. One fast System One
+request judges whether the question needs the workspace tools, whether it needs
+web search, and how much thinking it calls for. wut drops tools only when Jev
+is confident they are unnecessary, and a TypeSafe failure or an answer slower
+than two seconds falls back to the normal behavior. To let Jev also choose the
+reasoning level per question, pick `Auto` under Reasoning in `wut --settings`.
+Without the key, wut runs normally with no TypeSafe dependency.
+[`evals/README.md`](evals/README.md) explains how to measure triage on labeled
+questions.
+
 ## Use
 
 ```sh
