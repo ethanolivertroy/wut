@@ -72,7 +72,7 @@ fn workspace_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "read",
-            description: "Read a text file. Paths are relative to the workspace. Secret files like .env are never readable.",
+            description: "Read a text file. Paths are relative to the workspace and must stay inside it. Secret files like .env are never readable.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -88,7 +88,7 @@ fn workspace_tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Rust-style regular expression"},
-                    "path": {"type": "string", "description": "File or directory to search (default: workspace root)"},
+                    "path": {"type": "string", "description": "File or directory inside the workspace to search (default: workspace root)"},
                     "glob": {"type": "string", "description": "Only search files whose name matches this glob, e.g. *.rs"},
                 },
                 "required": ["pattern"],
@@ -111,7 +111,7 @@ fn workspace_tools() -> Vec<Tool> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory path (default: workspace root)"},
+                    "path": {"type": "string", "description": "Directory inside the workspace (default: workspace root)"},
                 },
             }),
         },
@@ -234,7 +234,7 @@ fn tool_error(name: &str, message: impl std::fmt::Display) -> Error {
 
 fn read(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<String> {
     let path = string_argument(arguments, "path", "read", true)?;
-    let path = resolve(&path, root)?;
+    let path = resolve(&path, root, "read")?;
     if is_denied(&path) {
         return Err(tool_error(
             "read",
@@ -376,7 +376,7 @@ fn list(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     let path = if path.is_empty() {
         root.to_owned()
     } else {
-        resolve(&path, root)?
+        resolve(&path, root, "ls")?
     };
     let entries = std::fs::read_dir(&path).map_err(|error| {
         tool_error(
@@ -403,27 +403,21 @@ fn list(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
 }
 
 fn search_targets(path: Option<&str>, root: &Path) -> Result<Vec<PathBuf>> {
-    match path {
-        Some(path) => {
-            let path = resolve(path, root)?;
-            if path.is_file() {
-                Ok(vec![path])
-            } else {
-                Ok(walkdir::WalkDir::new(&path)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.into_path())
-                    .collect())
-            }
-        }
-        None => Ok(walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.into_path())
-            .collect()),
+    let path = match path {
+        Some(path) => resolve(path, root, "grep")?,
+        None => root.to_owned(),
+    };
+    if path.is_file() {
+        return Ok(vec![path]);
     }
+    // Only regular files: a symlink found while walking could point anywhere.
+    Ok(walkdir::WalkDir::new(&path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .collect())
 }
 
 fn string_argument(
@@ -445,12 +439,32 @@ fn string_argument(
     }
 }
 
-fn resolve(path: &str, root: &Path) -> Result<PathBuf> {
+/// Resolves a path the model asked for and keeps it inside the workspace.
+/// Symlinks and `..` are resolved before the check, so neither can point a
+/// tool outside it. The result is rooted at `root` so it displays relative.
+fn resolve(path: &str, root: &Path, tool: &str) -> Result<PathBuf> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        tool_error(
+            tool,
+            format!("could not open the workspace '{}': {error}", root.display()),
+        )
+    })?;
     let candidate = Path::new(path);
-    Ok(if candidate.is_absolute() {
+    let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
     } else {
-        root.join(candidate)
+        canonical_root.join(candidate)
+    };
+    let target = joined
+        .canonicalize()
+        .map_err(|error| tool_error(tool, format!("could not open '{path}': {error}")))?;
+    let relative = target
+        .strip_prefix(&canonical_root)
+        .map_err(|_| tool_error(tool, format!("'{path}' is outside the workspace")))?;
+    Ok(if relative.as_os_str().is_empty() {
+        root.to_owned()
+    } else {
+        root.join(relative)
     })
 }
 
@@ -515,7 +529,104 @@ fn glob_inner(pattern: &[u8], text: &[u8]) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{ToolSet, catalog, format_search_results};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{ToolSet, catalog, execute, format_search_results};
+
+    /// A fresh `workspace/` with a `secret.txt` beside it, outside the workspace.
+    fn sandbox() -> (PathBuf, PathBuf) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "wut-tools-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {} // needle\n").unwrap();
+        std::fs::write(base.join("secret.txt"), "needle outside\n").unwrap();
+        (base, workspace)
+    }
+
+    fn run(
+        name: &str,
+        arguments: serde_json::Value,
+        root: &std::path::Path,
+    ) -> Result<String, String> {
+        execute(name, &arguments, root).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn paths_outside_the_workspace_are_refused() {
+        let (base, workspace) = sandbox();
+        let secret = base.join("secret.txt");
+        let secret = secret.to_str().unwrap();
+        for path in ["../secret.txt", "src/../../secret.txt", secret] {
+            let error = run("read", json!({"path": path}), &workspace).unwrap_err();
+            assert!(error.contains("outside the workspace"), "{path}: {error}");
+        }
+        for path in ["..", "/"] {
+            let error = run("ls", json!({"path": path}), &workspace).unwrap_err();
+            assert!(error.contains("outside the workspace"), "{path}: {error}");
+            let error = run(
+                "grep",
+                json!({"pattern": "needle", "path": path}),
+                &workspace,
+            )
+            .unwrap_err();
+            assert!(error.contains("outside the workspace"), "{path}: {error}");
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn paths_inside_the_workspace_still_work() {
+        let (base, workspace) = sandbox();
+        let absolute = workspace.join("src/main.rs");
+        for path in [
+            "src/main.rs",
+            "src/../src/main.rs",
+            absolute.to_str().unwrap(),
+        ] {
+            let content = run("read", json!({"path": path}), &workspace).unwrap();
+            assert!(content.contains("needle"), "{path}");
+        }
+        assert_eq!(run("ls", json!({"path": "."}), &workspace).unwrap(), "src/");
+        assert_eq!(
+            run(
+                "grep",
+                json!({"pattern": "needle", "path": "src"}),
+                &workspace
+            )
+            .unwrap(),
+            "src/main.rs:1:fn main() {} // needle"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_reach_outside_the_workspace() {
+        let (base, workspace) = sandbox();
+        std::os::unix::fs::symlink(base.join("secret.txt"), workspace.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(&base, workspace.join("up")).unwrap();
+        std::fs::write(workspace.join(".env"), "TOKEN=needle\n").unwrap();
+        std::os::unix::fs::symlink(workspace.join(".env"), workspace.join("notes.txt")).unwrap();
+
+        for path in ["link.txt", "up/secret.txt"] {
+            let error = run("read", json!({"path": path}), &workspace).unwrap_err();
+            assert!(error.contains("outside the workspace"), "{path}: {error}");
+        }
+        let error = run("read", json!({"path": "notes.txt"}), &workspace).unwrap_err();
+        assert!(error.contains("secret file"), "{error}");
+        assert_eq!(
+            run("grep", json!({"pattern": "needle"}), &workspace).unwrap(),
+            "src/main.rs:1:fn main() {} // needle"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn catalog_follows_the_tool_set() {
