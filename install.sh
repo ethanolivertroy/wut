@@ -239,13 +239,20 @@ main() {
   trap cleanup 0
   trap 'exit 1' HUP INT TERM
 
+  # Build from source only when this script was run as a file from a wut
+  # checkout. Under `curl | sh`, $0 is the shell, and its dirname would be
+  # whatever directory the user happens to be in.
   script_dir=''
-  script_parent=$(dirname "$0")
-  if script_dir=$(CDPATH='' cd -- "$script_parent" 2>/dev/null && pwd); then
-    :
+  if [ -f "$0" ] && [ "${0##*/}" = install.sh ]; then
+    script_parent=$(dirname "$0")
+    if script_dir=$(CDPATH='' cd -- "$script_parent" 2>/dev/null && pwd); then
+      :
+    fi
   fi
   if [ "$VERSION" = latest ] &&
+    [ -n "$script_dir" ] &&
     [ -f "$script_dir/Cargo.toml" ] &&
+    grep -Eq '^name = "wut"$' "$script_dir/Cargo.toml" &&
     [ -f "$script_dir/src/main.rs" ]; then
     cargo_bin="${CARGO:-}"
     if [ -z "$cargo_bin" ] && [ -n "${HOME:-}" ] &&
