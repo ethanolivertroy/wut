@@ -326,12 +326,32 @@ fn run_turn(
     response_color: config::ResponseColor,
 ) -> Result<String> {
     let mut output = TurnOutput::new(decorate, response_color);
-    let mut spinner = spinner::Spinner::start(decorate && spinner::enabled());
-    let answer = agent.ask(question, cwd, &mut |delta| {
-        spinner.stop();
-        output.push(delta)
-    });
-    spinner.stop();
+    let spinner_enabled = decorate && spinner::enabled();
+    let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
+    let show_tools = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let answer = agent.ask(
+        question,
+        cwd,
+        &mut |delta| {
+            spinner.borrow_mut().stop();
+            output.push(delta)
+        },
+        // Every tool call is shown, so a reply never reads files or searches
+        // the web out of sight.
+        &mut |call| {
+            if show_tools {
+                let mut spinner = spinner.borrow_mut();
+                spinner.stop();
+                if decorate {
+                    eprintln!("\x1b[90m· {call}\x1b[0m");
+                } else {
+                    eprintln!("· {call}");
+                }
+                *spinner = spinner::Spinner::start(spinner_enabled);
+            }
+        },
+    );
+    spinner.borrow_mut().stop();
     let notice = agent.take_notice();
     let result = answer.and_then(|answer| {
         output.finish(&answer)?;

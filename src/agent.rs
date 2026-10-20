@@ -63,9 +63,10 @@ impl Agent {
         question: &str,
         root: &Path,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
+        on_tool: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let checkpoint = self.messages.len();
-        let result = self.ask_inner(question, root, on_delta);
+        let result = self.ask_inner(question, root, on_delta, on_tool);
         if result.is_err() {
             self.messages.truncate(checkpoint);
         }
@@ -83,6 +84,7 @@ impl Agent {
         question: &str,
         root: &Path,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
+        on_tool: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let plan = self.plan(question, root);
         let effort = self.turn_effort(plan.effort);
@@ -107,7 +109,7 @@ impl Agent {
                     .push(Message::text(Role::Assistant, outcome.content.clone()));
                 return Ok(outcome.content);
             }
-            self.apply_tool_turn(outcome, root)?;
+            self.apply_tool_turn(outcome, root, on_tool)?;
         }
         Err(Error::new(
             format!("the model used tools more than {MAX_TURNS} times without answering"),
@@ -146,12 +148,18 @@ impl Agent {
             .or_else(|| self.effort.clone())
     }
 
-    fn apply_tool_turn(&mut self, outcome: Outcome, root: &Path) -> Result<()> {
+    fn apply_tool_turn(
+        &mut self,
+        outcome: Outcome,
+        root: &Path,
+        on_tool: &mut dyn FnMut(&str),
+    ) -> Result<()> {
         let mut assistant = Message::text(Role::Assistant, outcome.content);
         assistant.tool_calls = outcome.tool_calls.clone();
         self.messages.push(assistant);
         for call in outcome.tool_calls {
             let arguments = parse_arguments(&call.arguments);
+            on_tool(&tools::describe_call(&call.name, &arguments));
             let content = match tools::execute(&call.name, &arguments, root) {
                 Ok(content) => content,
                 Err(error) => error.message().to_owned(),
