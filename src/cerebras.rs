@@ -7,6 +7,9 @@ use crate::error::{Error, Result};
 
 const DEFAULT_BASE_URL: &str = "https://api.cerebras.ai/v1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest wait for the next bytes of a response. Each read restarts
+/// it, so a long answer that keeps streaming is never cut off.
+const READ_TIMEOUT: Duration = Duration::from_secs(90);
 const DEFAULT_MODEL: &str = "gpt-oss-120b";
 const ENV_KEY: &str = "CEREBRAS_API_KEY";
 const CREDENTIALS_FILE: &str = "wut/credentials";
@@ -210,6 +213,7 @@ impl Client {
         let body = request_body(messages, tools, model, effort);
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(READ_TIMEOUT)
             .build();
         let response = agent
             .post(&format!("{}/chat/completions", self.base_url))
@@ -462,4 +466,103 @@ fn api_status_error(status: u16, body: &str) -> Error {
         format!("the inference endpoint returned HTTP {status}: {detail}")
     };
     Error::new(message, help)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventStream, api_status_error, collect_stream};
+    use crate::error::Result;
+
+    fn collect(body: &str) -> (Result<super::Outcome>, String) {
+        let mut streamed = String::new();
+        let outcome = collect_stream(EventStream::new(body.as_bytes()), &mut |delta| {
+            streamed.push_str(delta);
+            Ok(())
+        });
+        (outcome, streamed)
+    }
+
+    #[test]
+    fn streams_content_until_the_done_marker() {
+        let (outcome, streamed) = collect(concat!(
+            ": keep-alive\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\r\n\r\n",
+            "data:{\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.content, "Hello");
+        assert_eq!(streamed, "Hello");
+        assert!(outcome.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn merges_tool_call_fragments_by_index() {
+        let (outcome, _) = collect(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
+            "{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}},",
+            "{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"ls\",\"arguments\":\"{}\"}}",
+            "]}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[",
+            "{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"x\\\"}\"}}",
+            "]}}]}\n",
+            "data: [DONE]\n",
+        ));
+        let calls = outcome.unwrap().tool_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (
+                calls[0].id.as_str(),
+                calls[0].name.as_str(),
+                calls[0].arguments.as_str()
+            ),
+            ("a", "read", "{\"path\":\"x\"}")
+        );
+        assert_eq!(
+            (calls[1].name.as_str(), calls[1].arguments.as_str()),
+            ("ls", "{}")
+        );
+    }
+
+    #[test]
+    fn a_stream_cut_off_before_done_is_an_error() {
+        let (outcome, streamed) =
+            collect("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n");
+        assert_eq!(streamed, "partial");
+        let error = outcome.unwrap_err().to_string();
+        assert!(
+            error.contains("ended before its completion marker"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stream_errors_and_bad_json_are_reported() {
+        let (outcome, _) = collect("data: {\"error\":{\"message\":\"quota exceeded\"}}\n");
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("quota exceeded"), "{error}");
+
+        let (outcome, _) = collect("data: {not json\n");
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("could not decode"), "{error}");
+    }
+
+    #[test]
+    fn http_errors_keep_the_detail_and_suggest_a_fix() {
+        let error = api_status_error(401, r#"{"error":{"message":"bad key"}}"#);
+        assert!(error.to_string().contains("HTTP 401: bad key"), "{error}");
+        assert!(error.help().contains("API key"));
+
+        let error = api_status_error(429, r#"{"message":"slow down"}"#);
+        assert!(error.to_string().contains("HTTP 429: slow down"));
+        assert!(error.help().contains("rate limit"));
+
+        let error = api_status_error(503, "  ");
+        assert_eq!(
+            error.to_string(),
+            "the inference endpoint returned HTTP 503"
+        );
+        assert!(error.help().contains("temporarily unavailable"));
+    }
 }

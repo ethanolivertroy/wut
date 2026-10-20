@@ -49,6 +49,11 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    #[cfg(test)]
+    pub fn help(&self) -> &str {
+        &self.help
+    }
 }
 
 impl Display for Error {
