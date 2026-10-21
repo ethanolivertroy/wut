@@ -122,6 +122,28 @@ const MAX_OUTPUT_CHARS: usize = 32 * 1_024;
 const MAX_MATCH_LINES: usize = 200;
 const MAX_FIND_RESULTS: usize = 500;
 const MAX_FILE_BYTES: usize = 512 * 1_024;
+const MAX_WALK_ENTRIES: usize = 20_000;
+/// Folders a search walk never enters: they are huge or generated, and
+/// almost never what a question is about. Naming one as the path still works.
+const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules"];
+/// Folders whose contents are credentials, matched case-insensitively.
+const SECRET_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker"];
+/// Files that hold credentials, matched case-insensitively.
+const SECRET_FILES: &[&str] = &[
+    "credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+    ".git-credentials",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+];
+/// Extensions of private keys and certificate bundles.
+const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx"];
+const ENV_EXAMPLES: &[&str] = &[".env.example", ".env.sample", ".env.template"];
 const EXA_API_URL: &str = "https://api.exa.ai/search";
 const EXA_API_KEY: &str = "EXA_API_KEY";
 const WEB_SEARCH_RESULTS: u8 = 5;
@@ -146,6 +168,46 @@ pub fn execute(name: &str, arguments: &Value, root: &Path) -> Result<String> {
              https://github.com/ethanolivertroy/wut/issues",
         )),
     }
+}
+
+/// A one-line summary of a tool call for the terminal, such as
+/// `read src/main.rs`. Control characters are replaced so a model-chosen
+/// argument cannot move the cursor or change colors.
+pub fn describe_call(name: &str, arguments: &Value) -> String {
+    let argument = |key: &str| arguments[key].as_str().unwrap_or_default();
+    let summary = match name {
+        "read" => format!("read {}", argument("path")),
+        "ls" => format!("ls {}", argument("path")),
+        "find" => format!("find {}", argument("pattern")),
+        "grep" => {
+            let mut text = format!("grep {:?}", argument("pattern"));
+            if !argument("path").is_empty() {
+                text.push_str(&format!(" in {}", argument("path")));
+            }
+            if !argument("glob").is_empty() {
+                text.push_str(&format!(" ({})", argument("glob")));
+            }
+            text
+        }
+        "web_search" => format!("web search {:?}", argument("query")),
+        other => other.to_owned(),
+    };
+    let mut summary: String = summary
+        .trim_end()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if summary.chars().count() > 120 {
+        summary = summary.chars().take(119).collect();
+        summary.push('…');
+    }
+    summary
 }
 
 fn exa_api_key() -> Option<String> {
@@ -287,7 +349,8 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     } else {
         Some(path.as_str())
     };
-    for path in search_targets(target, root)? {
+    let (targets, stopped) = search_targets(target, root)?;
+    for path in targets {
         if is_denied(&path) || !path.is_file() {
             continue;
         }
@@ -316,11 +379,19 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         }
     }
     if lines.is_empty() {
-        return Ok("no matches".to_owned());
+        return Ok(if stopped {
+            format!("no matches in the first {MAX_WALK_ENTRIES} entries; search a narrower path")
+        } else {
+            "no matches".to_owned()
+        });
     }
     let mut output = truncate_output(lines.join("\n"));
     if truncated {
         output.push_str(&format!("\n[stopped at {MAX_MATCH_LINES} matching lines]"));
+    } else if stopped {
+        output.push_str(&format!(
+            "\n[stopped after {MAX_WALK_ENTRIES} entries; search a narrower path]"
+        ));
     }
     Ok(output)
 }
@@ -329,11 +400,8 @@ fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     let pattern = string_argument(arguments, "pattern", "find", true)?;
     let mut results: Vec<String> = Vec::new();
     let mut truncated = false;
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-    {
+    let mut walk = walk(root);
+    for entry in walk.by_ref() {
         let path = entry.path();
         let Some(relative) = path.strip_prefix(root).ok() else {
             continue;
@@ -359,7 +427,11 @@ fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         truncated = true;
     }
     if results.is_empty() {
-        return Ok("no matches".to_owned());
+        return Ok(if walk.stopped {
+            format!("no matches in the first {MAX_WALK_ENTRIES} entries; search a narrower path")
+        } else {
+            "no matches".to_owned()
+        });
     }
     let mut output = results.join("\n");
     if output.len() > MAX_OUTPUT_CHARS {
@@ -367,6 +439,10 @@ fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         output.push_str("\n[truncated]");
     } else if truncated {
         output.push_str(&format!("\n[stopped at {MAX_FIND_RESULTS} results]"));
+    } else if walk.stopped {
+        output.push_str(&format!(
+            "\n[stopped after {MAX_WALK_ENTRIES} entries; search a narrower path]"
+        ));
     }
     Ok(output)
 }
@@ -378,6 +454,12 @@ fn list(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     } else {
         resolve(&path, root, "ls")?
     };
+    if is_denied(&path) {
+        return Err(tool_error(
+            "ls",
+            format!("'{}' holds secrets and cannot be listed", path.display()),
+        ));
+    }
     let entries = std::fs::read_dir(&path).map_err(|error| {
         tool_error(
             "ls",
@@ -402,22 +484,72 @@ fn list(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     Ok(names.join("\n"))
 }
 
-fn search_targets(path: Option<&str>, root: &Path) -> Result<Vec<PathBuf>> {
+/// The files grep searches, and whether the walk hit its entry limit.
+fn search_targets(path: Option<&str>, root: &Path) -> Result<(Vec<PathBuf>, bool)> {
     let path = match path {
         Some(path) => resolve(path, root, "grep")?,
         None => root.to_owned(),
     };
     if path.is_file() {
-        return Ok(vec![path]);
+        return Ok((vec![path], false));
     }
     // Only regular files: a symlink found while walking could point anywhere.
-    Ok(walkdir::WalkDir::new(&path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
+    let mut walk = walk(&path);
+    let files = walk
+        .by_ref()
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
-        .collect())
+        .collect();
+    Ok((files, walk.stopped))
+}
+
+/// Walks `start` without following symlinks, skipping secret and generated
+/// folders below it, and stopping after `MAX_WALK_ENTRIES` entries.
+fn walk(start: &Path) -> Walk {
+    walk_limited(start, MAX_WALK_ENTRIES)
+}
+
+fn walk_limited(start: &Path, limit: usize) -> Walk {
+    let entries = walkdir::WalkDir::new(start)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !entry.file_type().is_dir()
+                || !(is_denied(entry.path())
+                    || SKIPPED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()))
+        });
+    Walk {
+        entries: Box::new(entries),
+        seen: 0,
+        limit,
+        stopped: false,
+    }
+}
+
+struct Walk {
+    entries: Box<dyn Iterator<Item = walkdir::Result<walkdir::DirEntry>>>,
+    seen: usize,
+    limit: usize,
+    stopped: bool,
+}
+
+impl Iterator for Walk {
+    type Item = walkdir::DirEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.seen >= self.limit {
+                self.stopped = true;
+                return None;
+            }
+            self.seen += 1;
+            match self.entries.next()? {
+                Ok(entry) => return Some(entry),
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 fn string_argument(
@@ -475,12 +607,29 @@ fn display(path: &Path, root: &Path) -> String {
         .into_owned()
 }
 
+/// Whether a path is, or sits inside, something that holds credentials.
+/// Names are compared case-insensitively because macOS and Windows
+/// filesystems usually are.
 pub fn is_denied(path: &Path) -> bool {
-    let name = file_name(path);
-    if name == ".env" || name.starts_with(".env.") {
-        return name != ".env.example";
+    let in_secret_dir = path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            let name = component.as_os_str().to_string_lossy().to_lowercase();
+            SECRET_DIRS.contains(&name.as_str())
+        })
+    });
+    if in_secret_dir {
+        return true;
     }
-    false
+    let name = file_name(path).to_lowercase();
+    if SECRET_DIRS.contains(&name.as_str()) || SECRET_FILES.contains(&name.as_str()) {
+        return true;
+    }
+    if name == ".env" || name.starts_with(".env.") {
+        return !ENV_EXAMPLES.contains(&name.as_str());
+    }
+    Path::new(&name)
+        .extension()
+        .is_some_and(|extension| SECRET_EXTENSIONS.contains(&extension.to_string_lossy().as_ref()))
 }
 
 fn file_name(path: &Path) -> String {
@@ -532,7 +681,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{ToolSet, catalog, execute, format_search_results};
+    use super::{
+        ToolSet, catalog, describe_call, execute, format_search_results, is_denied, walk_limited,
+    };
 
     /// A fresh `workspace/` with a `secret.txt` beside it, outside the workspace.
     fn sandbox() -> (PathBuf, PathBuf) {
@@ -626,6 +777,115 @@ mod tests {
             "src/main.rs:1:fn main() {} // needle"
         );
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn secret_files_are_denied_in_any_case() {
+        for path in [
+            ".env",
+            ".ENV",
+            ".env.local",
+            "app/.Env.Production",
+            ".npmrc",
+            ".netrc",
+            "home/.config/wut/credentials",
+            ".aws/config",
+            "x/.SSH/known_hosts",
+            ".ssh",
+            "id_ed25519",
+            "certs/server.PEM",
+            "tls.key",
+        ] {
+            assert!(is_denied(std::path::Path::new(path)), "{path}");
+        }
+        for path in [
+            ".env.example",
+            ".ENV.SAMPLE",
+            "src/env.rs",
+            "id_ed25519.pub",
+            "docs/credentials.md",
+            "keys.rs",
+            ".envrc.md",
+        ] {
+            assert!(!is_denied(std::path::Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn walks_skip_generated_and_secret_folders() {
+        let (base, workspace) = sandbox();
+        for dir in [".git", "target/debug", "node_modules/pkg", ".ssh"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+            std::fs::write(workspace.join(dir).join("hit.rs"), "needle\n").unwrap();
+        }
+        assert_eq!(
+            run("grep", json!({"pattern": "needle"}), &workspace).unwrap(),
+            "src/main.rs:1:fn main() {} // needle"
+        );
+        assert_eq!(
+            run("find", json!({"pattern": "*.rs"}), &workspace).unwrap(),
+            "src/main.rs"
+        );
+        // Naming a skipped folder still searches it, but never a secret one.
+        assert_eq!(
+            run(
+                "grep",
+                json!({"pattern": "needle", "path": "node_modules"}),
+                &workspace
+            )
+            .unwrap(),
+            "node_modules/pkg/hit.rs:1:needle"
+        );
+        assert_eq!(
+            run(
+                "grep",
+                json!({"pattern": "needle", "path": ".ssh"}),
+                &workspace
+            )
+            .unwrap(),
+            "no matches"
+        );
+        assert!(run("ls", json!({"path": ".ssh"}), &workspace).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn walks_stop_at_their_entry_limit() {
+        let (base, workspace) = sandbox();
+        let mut walk = walk_limited(&workspace, 2);
+        assert_eq!(walk.by_ref().count(), 2);
+        assert!(walk.stopped);
+        let mut walk = walk_limited(&workspace, 100);
+        assert_eq!(walk.by_ref().count(), 3);
+        assert!(!walk.stopped);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn describes_tool_calls_on_one_safe_line() {
+        assert_eq!(
+            describe_call("read", &json!({"path": "src/main.rs"})),
+            "read src/main.rs"
+        );
+        assert_eq!(
+            describe_call(
+                "grep",
+                &json!({"pattern": "fn main", "path": "src", "glob": "*.rs"})
+            ),
+            "grep \"fn main\" in src (*.rs)"
+        );
+        assert_eq!(
+            describe_call("web_search", &json!({"query": "rust 1.90"})),
+            "web search \"rust 1.90\""
+        );
+        assert_eq!(describe_call("ls", &json!({})), "ls");
+        assert_eq!(
+            describe_call("read", &json!({"path": "a\u{1b}[2Jb\nc"})),
+            "read a?[2Jb?c"
+        );
+        let long = describe_call("read", &json!({"path": "x".repeat(300)}));
+        assert_eq!(long.chars().count(), 120);
+        assert!(long.ends_with('…'));
     }
 
     #[test]
