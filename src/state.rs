@@ -211,13 +211,36 @@ fn latest_from(directory: &Path, cwd: &str) -> Result<Option<Session>> {
     }
     candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
+    let mut skipped = Vec::new();
+    let mut found = None;
     for (_, path) in candidates {
-        let session = load_session(&path)?;
-        if session.cwd == cwd {
-            return Ok(Some(session));
+        match load_session(&path) {
+            Ok(session) if session.cwd == cwd => {
+                found = Some(session);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => skipped.push(error),
         }
     }
-    Ok(None)
+    warn_skipped(&skipped);
+    Ok(found)
+}
+
+/// One unreadable session file should not hide every other session, so
+/// loaders skip it and say so once.
+fn warn_skipped(skipped: &[Error]) {
+    if skipped.is_empty() {
+        return;
+    }
+    eprintln!(
+        "wut: skipped {} unreadable session file{}:",
+        skipped.len(),
+        if skipped.len() == 1 { "" } else { "s" }
+    );
+    for error in skipped {
+        eprintln!("     {}", error.message());
+    }
 }
 
 pub fn load_all() -> Result<Vec<Session>> {
@@ -232,13 +255,18 @@ fn load_from(directory: &Path) -> Result<Vec<Session>> {
     }
 
     let mut sessions = Vec::new();
+    let mut skipped = Vec::new();
     for entry in session_entries(directory)? {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        sessions.push(load_session(&path)?);
+        match load_session(&path) {
+            Ok(session) => sessions.push(session),
+            Err(error) => skipped.push(error),
+        }
     }
+    warn_skipped(&skipped);
     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
     Ok(sessions)
 }
@@ -387,4 +415,43 @@ fn optional_string(value: &Value, key: &str) -> Result<Option<String>> {
 
 fn invalid_session(message: impl Into<String>) -> Error {
     Error::new(message, "remove the invalid session file and try again")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{Session, latest_from, load_from, save_to};
+
+    fn directory() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "wut-state-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn a_corrupt_session_file_does_not_hide_the_others() {
+        let directory = directory();
+        let mut session = Session::new("cerebras", "abc".to_owned(), Path::new("/work"));
+        session.add_turn("hi", "hello".to_owned());
+        save_to(&directory, &session).unwrap();
+        std::fs::write(directory.join("broken.json"), "{not json").unwrap();
+        std::fs::write(directory.join("empty.json"), "").unwrap();
+
+        let sessions = load_from(&directory).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].turns.len(), 1);
+
+        let latest = latest_from(&directory, "/work").unwrap().unwrap();
+        assert_eq!(latest.turns[0].user, "hi");
+        assert!(latest_from(&directory, "/elsewhere").unwrap().is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
