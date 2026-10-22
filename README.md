@@ -47,8 +47,12 @@ questions.
 
 ```sh
 wut "why is this broken?" # ask
+cat log | wut "why?"      # ask about piped input
 wut                       # chat
 wut -c                    # continue
 wut --sessions            # history
 wut --settings            # configure
 ```
+
+In a chat, Ctrl-C stops the current answer; Ctrl-D or Ctrl-C on an empty line
+exits.
