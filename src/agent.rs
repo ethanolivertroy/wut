@@ -88,8 +88,10 @@ impl Agent {
     ) -> Result<String> {
         let plan = self.plan(question, root);
         let effort = self.turn_effort(plan.effort);
+        let start = self.messages.len();
         self.messages.push(Message::text(Role::User, question));
         for _ in 0..MAX_TURNS {
+            crate::cancel::check()?;
             let tools = tools::catalog(plan.tools.union(tools_in_history(&self.messages)));
             let outcome = self.client.stream(
                 &self.messages,
@@ -105,6 +107,11 @@ impl Agent {
                         "try again; if it keeps happening, lower the reasoning level",
                     ));
                 }
+                // Keep only the question and the answer. The tool calls and
+                // their results would otherwise be sent again with every
+                // later question, and a saved session drops them anyway.
+                self.messages.truncate(start);
+                self.messages.push(Message::text(Role::User, question));
                 self.messages
                     .push(Message::text(Role::Assistant, outcome.content.clone()));
                 return Ok(outcome.content);
@@ -158,6 +165,7 @@ impl Agent {
         assistant.tool_calls = outcome.tool_calls.clone();
         self.messages.push(assistant);
         for call in outcome.tool_calls {
+            crate::cancel::check()?;
             let arguments = parse_arguments(&call.arguments);
             on_tool(&tools::describe_call(&call.name, &arguments));
             let content = match tools::execute(&call.name, &arguments, root) {
@@ -210,8 +218,11 @@ fn recent_exchanges(messages: &[Message], limit: usize) -> Vec<(String, String)>
 
 #[cfg(test)]
 mod tests {
-    use super::{recent_exchanges, tools_in_history};
-    use crate::cerebras::{Message, Role, ToolCall};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    use super::{Agent, recent_exchanges, tools_in_history};
+    use crate::cerebras::{Client, Message, Role, ToolCall};
     use crate::tools::ToolSet;
 
     fn calling(names: &[&str]) -> Message {
@@ -284,5 +295,93 @@ mod tests {
             ]
         );
         assert!(recent_exchanges(&messages[..1], 2).is_empty());
+    }
+
+    /// Serves one canned SSE body per request, in order, and returns the
+    /// base URL plus a handle yielding the request bodies it saw.
+    fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in responses {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+                let mut stream = reader.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        (base, handle)
+    }
+
+    fn sse(events: &[&str]) -> String {
+        let mut body: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    #[test]
+    fn tool_traffic_is_dropped_once_the_turn_is_answered() {
+        let (base, server) = serve(vec![
+            sse(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"ls","arguments":"{}"}}]}}]}"#,
+            ]),
+            sse(&[r#"{"choices":[{"delta":{"content":"two files"}}]}"#]),
+            sse(&[r#"{"choices":[{"delta":{"content":"yes"}}]}"#]),
+        ]);
+        let mut agent = Agent {
+            client: Client::for_test(&base),
+            model: "gpt-oss-120b".to_owned(),
+            effort: None,
+            auto_effort: false,
+            triage: None,
+            notice: None,
+            messages: Vec::new(),
+        };
+        let root = std::env::temp_dir();
+        let mut tools = Vec::new();
+        let answer = agent
+            .ask("what is here?", &root, &mut |_| Ok(()), &mut |call| {
+                tools.push(call.to_owned())
+            })
+            .unwrap();
+        assert_eq!(answer, "two files");
+        assert_eq!(tools, ["ls"]);
+        let roles: Vec<_> = agent.messages.iter().map(|message| message.role).collect();
+        assert_eq!(roles, [Role::User, Role::Assistant]);
+
+        agent
+            .ask("sure?", &root, &mut |_| Ok(()), &mut |_| {})
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(
+            requests[1].contains("\"tool\""),
+            "the tool result is sent within its turn"
+        );
+        assert!(!requests[2].contains("\"tool\""), "{}", requests[2]);
+        assert!(requests[2].contains("two files"));
     }
 }

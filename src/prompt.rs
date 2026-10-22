@@ -229,7 +229,11 @@ fn handle_key(
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Char('c') => return Some(Input::Eof),
+            KeyCode::Char('c') if line.is_empty() => return Some(Input::Eof),
+            KeyCode::Char('c') => {
+                line.clear();
+                *cursor = 0;
+            }
             KeyCode::Char('d') if line.is_empty() => return Some(Input::Eof),
             KeyCode::Char('d') => delete_at(line, *cursor),
             KeyCode::Char('a') => *cursor = 0,
@@ -299,6 +303,13 @@ fn handle_key(
         _ => {}
     }
     None
+}
+
+/// Whether a line is a command rather than a question: its first word must
+/// be a known command, so a question like `/etc/hosts perms?` is still asked.
+pub fn is_command(input: &str) -> bool {
+    let first = input.split_whitespace().next().unwrap_or_default();
+    COMMANDS.iter().any(|command| command.name == first)
 }
 
 fn matching_commands(input: &str) -> Vec<&'static Command> {
