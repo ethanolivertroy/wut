@@ -195,6 +195,14 @@ pub struct Client {
 }
 
 impl Client {
+    #[cfg(test)]
+    pub fn for_test(base_url: &str) -> Self {
+        Self {
+            api_key: "test".to_owned(),
+            base_url: base_url.to_owned(),
+        }
+    }
+
     pub fn new() -> Result<Self> {
         Ok(Self {
             api_key: auth_key()?,
@@ -373,6 +381,7 @@ impl<R: BufRead> EventStream<R> {
 
     fn next(&mut self) -> Result<Option<Event>> {
         loop {
+            crate::cancel::check()?;
             let mut line = String::new();
             let read = self.reader.read_line(&mut line).map_err(|error| {
                 Error::new(
