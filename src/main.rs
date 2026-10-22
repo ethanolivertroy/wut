@@ -1,4 +1,5 @@
 mod agent;
+mod cancel;
 mod cerebras;
 mod cli;
 mod config;
@@ -68,6 +69,7 @@ fn run() -> Result<()> {
             cli::Mode::OneShot(question) => {
                 let config = config::Config::load()?;
                 let settings = Settings::resolve(&config, None);
+                let question = Question::with_piped_context(question)?;
                 run_one_shot(&settings, config.instructions(), &question, None)
             }
             cli::Mode::Interactive => {
@@ -83,12 +85,8 @@ fn run() -> Result<()> {
                 if words.is_empty() {
                     run_interactive(settings, Some(session), config)
                 } else {
-                    run_one_shot(
-                        &settings,
-                        config.instructions(),
-                        &words.join(" "),
-                        Some(session),
-                    )
+                    let question = Question::with_piped_context(words.join(" "))?;
+                    run_one_shot(&settings, config.instructions(), &question, Some(session))
                 }
             }
             cli::Mode::Sessions => sessions(),
@@ -144,6 +142,107 @@ impl Settings {
     }
 }
 
+/// The most piped input wut sends. Anything longer is cut with a note.
+const MAX_PIPED_BYTES: usize = 256 * 1_024;
+
+/// A question as sent to the model and as saved in the session. They differ
+/// when input was piped in: the model sees all of it, the session file only
+/// records how much there was.
+#[derive(Debug, Eq, PartialEq)]
+struct Question {
+    prompt: String,
+    saved: String,
+}
+
+impl Question {
+    fn plain(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            prompt: text.clone(),
+            saved: text,
+        }
+    }
+
+    /// `cat log | wut why did this fail`: the piped text becomes context for
+    /// the question, sent as one turn.
+    fn with_piped_context(question: String) -> Result<Self> {
+        Ok(match piped_input()? {
+            Some(input) => Self::with_context(question, &input),
+            None => Self::plain(question),
+        })
+    }
+
+    fn with_context(question: String, input: &str) -> Self {
+        let fence = if input.contains("```") { "````" } else { "```" };
+        Self {
+            prompt: format!("{question}\n\n{fence}\n{}\n{fence}", input.trim_end()),
+            saved: format!("{question} [+{} of piped input]", byte_count(input.len())),
+        }
+    }
+}
+
+fn byte_count(bytes: usize) -> String {
+    if bytes < 1_024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{} KiB", bytes.div_ceil(1_024))
+    }
+}
+
+/// Everything piped into wut, or `None` when stdin is a terminal or there is
+/// nothing to read. Only a pipe or a redirected file counts, so a script that
+/// leaves stdin open on a socket or a device never hangs waiting for EOF.
+fn piped_input() -> Result<Option<String>> {
+    use std::io::{IsTerminal, Read};
+
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() || !stdin_is_pipe_or_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    stdin
+        .lock()
+        .take(MAX_PIPED_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::new(
+                format!("could not read piped input: {error}"),
+                "check stdin and try again",
+            )
+        })?;
+    let truncated = bytes.len() > MAX_PIPED_BYTES;
+    bytes.truncate(MAX_PIPED_BYTES);
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    if truncated {
+        text.push_str(&format!(
+            "\n[piped input cut off after {}]",
+            byte_count(MAX_PIPED_BYTES)
+        ));
+    }
+    Ok(Some(text))
+}
+
+#[cfg(unix)]
+fn stdin_is_pipe_or_file() -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::FileTypeExt;
+
+    std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .map(std::fs::File::from)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.file_type().is_fifo() || metadata.is_file())
+}
+
+#[cfg(not(unix))]
+fn stdin_is_pipe_or_file() -> bool {
+    true
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum InteractiveCommand {
     Settings,
@@ -170,7 +269,7 @@ fn parse_interactive_command(input: &str) -> Result<InteractiveCommand> {
 fn run_one_shot(
     settings: &Settings,
     instructions: &Instructions,
-    question: &str,
+    question: &Question,
     mut saved: Option<state::Session>,
 ) -> Result<()> {
     use std::io::{self, IsTerminal};
@@ -189,12 +288,12 @@ fn run_one_shot(
     )?;
     let answer = run_turn(
         &mut agent,
-        question,
+        &question.prompt,
         &cwd,
         decorate,
         settings.response_color,
     )?;
-    record_turn(&mut saved, settings, &cwd, question, answer)?;
+    record_turn(&mut saved, settings, &cwd, &question.saved, answer)?;
     Ok(())
 }
 
@@ -213,38 +312,41 @@ fn run_interactive(
         show_history(session, decorate, settings.response_color)?;
     }
 
-    let cwd = current_dir()?;
+    // A resumed session keeps working in its own folder, wherever wut was
+    // started from.
+    let cwd = match &saved {
+        Some(session) => session_dir(session)?,
+        None => current_dir()?,
+    };
     let mut settings_cache = settings_ui::Cache;
-    let mut piped_line = String::new();
     let mut agent = open_agent(&settings, config.instructions(), saved.as_ref())?;
 
-    loop {
-        let line = if terminal {
-            match prompt::Prompt::read()? {
-                prompt::Input::Line(line) => line,
-                prompt::Input::Eof => break,
-            }
-        } else {
-            piped_line.clear();
-            let bytes = io::stdin().read_line(&mut piped_line).map_err(|error| {
-                Error::new(
-                    format!("could not read input: {error}"),
-                    "check stdin and try again",
-                )
-            })?;
-            if bytes == 0 {
-                break;
-            }
-            piped_line.clone()
+    if !terminal {
+        // Piped into a bare `wut`: everything piped is one question, and
+        // never a command.
+        let Some(input) = piped_input()? else {
+            return Ok(());
         };
+        let question = Question::plain(input.trim());
+        let answer = run_turn(
+            &mut agent,
+            &question.prompt,
+            &cwd,
+            decorate,
+            settings.response_color,
+        )?;
+        return record_turn(&mut saved, &settings, &cwd, &question.saved, answer);
+    }
 
+    cancel::install();
+    while let prompt::Input::Line(line) = prompt::Prompt::read()? {
         let question = line.trim();
         if question.is_empty() {
             continue;
         }
-        if question.starts_with('/') {
+        if prompt::is_command(question) {
             match parse_interactive_command(question) {
-                Ok(InteractiveCommand::Settings) if terminal => {
+                Ok(InteractiveCommand::Settings) => {
                     settings_ui::run_session(&mut settings, &mut config, &mut settings_cache)?;
                     settings.response_color = config.response_color();
                     if let Some(saved) = &mut saved {
@@ -253,16 +355,7 @@ fn run_interactive(
                     }
                     agent = open_agent(&settings, config.instructions(), saved.as_ref())?;
                 }
-                Ok(InteractiveCommand::Settings) => {
-                    print_interactive_error(
-                        &Error::new(
-                            "/settings requires an interactive terminal",
-                            "rerun wut in a terminal",
-                        ),
-                        terminal,
-                    );
-                }
-                Err(error) => print_interactive_error(&error, terminal),
+                Err(error) => print_interactive_error(&error, true),
             }
             continue;
         }
@@ -275,11 +368,15 @@ fn run_interactive(
             settings.response_color,
         ) {
             Ok(answer) => answer,
-            Err(error) if terminal => {
+            Err(_) if cancel::requested() => {
+                eprintln!("{}", dim("cancelled", decorate));
+                eprintln!();
+                continue;
+            }
+            Err(error) => {
                 print_interactive_error(&error, true);
                 continue;
             }
-            Err(error) => return Err(error),
         };
         if decorate {
             eprintln!();
@@ -325,6 +422,7 @@ fn run_turn(
     decorate: bool,
     response_color: config::ResponseColor,
 ) -> Result<String> {
+    cancel::reset();
     let mut output = TurnOutput::new(decorate, response_color);
     let spinner_enabled = decorate && spinner::enabled();
     let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
@@ -342,21 +440,22 @@ fn run_turn(
             if show_tools {
                 let mut spinner = spinner.borrow_mut();
                 spinner.stop();
-                if decorate {
-                    eprintln!("\x1b[90m· {call}\x1b[0m");
-                } else {
-                    eprintln!("· {call}");
-                }
+                eprintln!("{}", dim(&format!("· {call}"), decorate));
                 *spinner = spinner::Spinner::start(spinner_enabled);
             }
         },
     );
     spinner.borrow_mut().stop();
     let notice = agent.take_notice();
-    let result = answer.and_then(|answer| {
-        output.finish(&answer)?;
-        Ok(answer)
-    });
+    let result = match answer {
+        Ok(answer) => output.finish(&answer).map(|()| answer),
+        Err(error) => {
+            // End any partly streamed answer on its own line before the
+            // error, or the next prompt would start mid-line.
+            let _ = output.finish("");
+            Err(error)
+        }
+    };
     if let Some(notice) = notice {
         if decorate && result.is_ok() {
             eprintln!();
@@ -364,6 +463,26 @@ fn run_turn(
         notice.print();
     }
     result
+}
+
+fn dim(text: &str, decorate: bool) -> String {
+    if decorate {
+        format!("\x1b[90m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
+fn session_dir(session: &state::Session) -> Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(&session.cwd);
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(Error::new(
+            format!("this session's folder no longer exists: {}", session.cwd),
+            "start a new session with 'wut'",
+        ))
+    }
 }
 
 fn record_turn(
@@ -403,10 +522,17 @@ fn show_history(
     decorate: bool,
     response_color: config::ResponseColor,
 ) -> Result<()> {
+    let elsewhere =
+        std::env::current_dir().is_ok_and(|cwd| cwd.to_string_lossy() != session.cwd.as_str());
     eprintln!(
-        "Continuing — {} turn{}",
+        "Continuing — {} turn{}{}",
         session.turns.len(),
-        if session.turns.len() == 1 { "" } else { "s" }
+        if session.turns.len() == 1 { "" } else { "s" },
+        if elsewhere {
+            format!(" in {}", session.cwd)
+        } else {
+            String::new()
+        }
     );
 
     for turn in &session.turns {
@@ -550,7 +676,39 @@ fn print_interactive_error(error: &Error, blank_line: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InteractiveCommand, parse_interactive_command, selection_after_delete};
+    use super::{
+        InteractiveCommand, Question, byte_count, parse_interactive_command, selection_after_delete,
+    };
+    use crate::prompt::is_command;
+
+    #[test]
+    fn only_known_commands_are_commands() {
+        assert!(is_command("/settings"));
+        assert!(is_command("/settings extra"));
+        assert!(!is_command("/etc/hosts what are these perms?"));
+        assert!(!is_command("/usr/bin/env -S"));
+        assert!(!is_command("what is /settings"));
+    }
+
+    #[test]
+    fn piped_input_is_context_for_the_question() {
+        let question = Question::with_context("why did this fail?".to_owned(), "error: boom\n");
+        assert_eq!(
+            question.prompt,
+            "why did this fail?\n\n```\nerror: boom\n```"
+        );
+        assert_eq!(
+            question.saved,
+            "why did this fail? [+12 bytes of piped input]"
+        );
+
+        let fenced = Question::with_context("explain".to_owned(), "```rust\nfn x() {}\n```");
+        assert!(fenced.prompt.starts_with("explain\n\n````\n```rust"));
+        assert!(fenced.prompt.ends_with("```\n````"));
+
+        assert_eq!(byte_count(2_048), "2 KiB");
+        assert_eq!(byte_count(2_049), "3 KiB");
+    }
 
     #[test]
     fn parses_interactive_commands() {

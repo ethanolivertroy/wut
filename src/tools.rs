@@ -539,7 +539,7 @@ impl Iterator for Walk {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.seen >= self.limit {
+            if self.seen >= self.limit || crate::cancel::requested() {
                 self.stopped = true;
                 return None;
             }
