@@ -22,6 +22,7 @@ unicode-width = { version = "0.2", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 walkdir = "2"
+ctrlc = { version = "3", default-features = false }
 
 [profile.release]
 codegen-units = 1
