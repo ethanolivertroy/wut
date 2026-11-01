@@ -211,7 +211,9 @@ jobs:
                   # setup-node writes an empty _authToken line, and npm treats
                   # even an empty credential as a token, so it would skip OIDC.
                   sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-                  npm publish --access public --provenance
+                  # An explicit tag, because npm won't move "latest" to a
+                  # version lower than one it has already seen.
+                  npm publish --access public --provenance --tag latest
 
     formula:
         name: Update Homebrew formula and npm version
