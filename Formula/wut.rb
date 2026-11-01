@@ -12,22 +12,22 @@ class Wut < Formula
   on_macos do
     on_arm do
       url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.1/wut-aarch64-apple-darwin.tar.gz"
-      sha256 "deeba99e7a87a02bd1dde5978a353738017cc848ec96d699c281f4aa258aa977"
+      sha256 "632591cdbbd167d96b8052241961d29a719cab82caf0bfd5a11fb91e728fd965"
     end
     on_intel do
       url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.1/wut-x86_64-apple-darwin.tar.gz"
-      sha256 "411c7e7c084544183d6dab390f7322167bc8e4ef5c9789042bde85de3de55ea9"
+      sha256 "5a2fe40466ea7abf586b3fd5e502cd9455fe955cea52ccc79617376e8c791cc0"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.1/wut-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "c2810d2fb29044531883af07ef757f2f0a9490fa7eb0b1ca7cb481f9f0848c7b"
+      sha256 "33029f724b1996c98194e6fba4579fa4e31974e6c392124501d9346e8f0e4129"
     end
     on_intel do
       url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.1/wut-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "4eef5e8a799853da66c4b478083d01a055ae092f9843d8f5180d7adb7c26d8c9"
+      sha256 "2475a43f20d1e906e42959e049307fa289e7436a2eb3b85cd8ba574957debd53"
     end
   end
 
