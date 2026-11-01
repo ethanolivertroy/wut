@@ -228,14 +228,12 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let (canonical, legacy) = paths()?;
-        if canonical.exists() {
-            return load_file(&canonical);
+        let path = path()?;
+        if path.exists() {
+            load_file(&path)
+        } else {
+            Ok(Self::default())
         }
-        let Some(legacy) = legacy.filter(|legacy| legacy.exists()) else {
-            return Ok(Self::default());
-        };
-        import_legacy(&canonical, &legacy)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -286,70 +284,32 @@ impl Config {
     }
 
     fn from_value(value: &Value) -> Result<Self> {
-        let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version > 4 {
+        let version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+        if version != 4 {
             return Err(Error::new(
-                format!("config version {version} requires a newer version of wut"),
-                "run 'wut --upgrade'",
-            ));
-        }
-        if version == 0 {
-            return Err(Error::new(
-                "config version 0 is not supported",
+                format!("config version {version} is not supported"),
                 "remove the config file, then run 'wut --settings'",
             ));
         }
-
-        let instructions_version = version.min(2);
-        let mut config = Self {
-            instructions: Instructions::from_json(value.get("instructions"), instructions_version)?,
-            ..Self::default()
-        };
-        if version >= 3 {
-            config.model = normalize_model(optional_string(value, "model")?);
-            config.reasoning = optional_string(value, "reasoning")?;
-            if version >= 4 {
-                let color = value
-                    .get("response_color")
-                    .and_then(Value::as_str)
-                    .and_then(ResponseColor::parse)
-                    .ok_or_else(|| invalid_config("config has invalid 'response_color'"))?;
-                config.response_color = color;
-            }
-            return Ok(config);
-        }
-        migrate_v2(value, &mut config);
-        Ok(config)
+        let response_color = value
+            .get("response_color")
+            .and_then(Value::as_str)
+            .and_then(ResponseColor::parse)
+            .ok_or_else(|| invalid_config("config has invalid 'response_color'"))?;
+        Ok(Self {
+            model: normalize_model(optional_string(value, "model")?),
+            reasoning: optional_string(value, "reasoning")?,
+            response_color,
+            instructions: Instructions::from_json(value.get("instructions"))?,
+        })
     }
-}
-
-fn migrate_v2(value: &Value, config: &mut Config) {
-    let agent = value["agent"].as_str().unwrap_or_default();
-    let settings = value["agents"]
-        .as_object()
-        .and_then(|agents| agents.get(agent).or_else(|| agents.get("cerebras")));
-    let raw = settings
-        .and_then(|settings| settings["model"].as_str())
-        .or_else(|| value["model"].as_str())
-        .unwrap_or_default();
-    let id = raw.strip_prefix("cerebras/").unwrap_or(raw);
-    let Some(model) = cerebras::find_model(id) else {
-        return;
-    };
-    config.model = Some(model.id.to_owned());
-    config.reasoning = settings
-        .and_then(|settings| settings["reasoning"].as_str())
-        .or_else(|| value["reasoning"].as_str())
-        .map(str::to_owned)
-        .or_else(|| model.default_reasoning.map(str::to_owned));
 }
 
 fn normalize_model(model: Option<String>) -> Option<String> {
     let Some(model) = model else {
         return Some(cerebras::default_model().to_owned());
     };
-    let id = model.strip_prefix("cerebras/").unwrap_or(&model);
-    Some(cerebras::resolve_model(Some(id)).to_owned())
+    Some(cerebras::resolve_model(Some(&model)).to_owned())
 }
 
 fn load_file(path: &Path) -> Result<Config> {
@@ -369,16 +329,6 @@ fn load_file(path: &Path) -> Result<Config> {
         .map_err(|error| error.context(format!("could not load '{}'", path.display())))
 }
 
-fn import_legacy(canonical: &Path, legacy: &Path) -> Result<Config> {
-    let legacy_config = load_file(legacy)?;
-    if storage::write_private_if_absent(canonical, &legacy_config.bytes()?, "wut config migration")?
-    {
-        Ok(legacy_config)
-    } else {
-        load_file(canonical)
-    }
-}
-
 fn optional_string(value: &Value, key: &str) -> Result<Option<String>> {
     match value.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -388,16 +338,11 @@ fn optional_string(value: &Value, key: &str) -> Result<Option<String>> {
 }
 
 fn path() -> Result<PathBuf> {
-    Ok(paths()?.0)
-}
-
-fn paths() -> Result<(PathBuf, Option<PathBuf>)> {
     if let Some(path) = std::env::var_os("WUT_CONFIG").filter(|value| !value.is_empty()) {
-        return Ok((PathBuf::from(path), None));
+        return Ok(PathBuf::from(path));
     }
     if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        let (canonical, legacy) = config_paths(Path::new(&path));
-        return Ok((canonical, Some(legacy)));
+        return Ok(PathBuf::from(path).join("wut/config.json"));
     }
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -407,12 +352,7 @@ fn paths() -> Result<(PathBuf, Option<PathBuf>)> {
                 "set XDG_CONFIG_HOME to a writable directory and try again",
             )
         })?;
-    let (canonical, legacy) = config_paths(&PathBuf::from(home).join(".config"));
-    Ok((canonical, Some(legacy)))
-}
-
-fn config_paths(root: &Path) -> (PathBuf, PathBuf) {
-    (root.join("wut/config.json"), root.join("ask/config.json"))
+    Ok(PathBuf::from(home).join(".config/wut/config.json"))
 }
 
 fn invalid_config(message: impl Into<String>) -> Error {
@@ -460,11 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_versions_it_cannot_read() {
-        let newer = load(json!({"version": 5})).err().unwrap();
-        assert!(newer.message().contains("newer version of wut"));
-        let zero = load(json!({"version": 0})).err().unwrap();
-        assert!(zero.message().contains("version 0"));
+    fn rejects_any_other_version() {
+        for version in [json!(0), json!(3), json!(5), json!(null)] {
+            let error = load(json!({"version": version, "response_color": "default"}))
+                .err()
+                .unwrap();
+            assert!(error.message().contains("is not supported"), "{version}");
+        }
     }
 
     #[test]
@@ -475,54 +417,22 @@ mod tests {
         assert!(color.message().contains("response_color"));
         let missing_color = load(json!({"version": 4})).err().unwrap();
         assert!(missing_color.message().contains("response_color"));
-        let model = load(json!({"version": 3, "model": 7})).err().unwrap();
+        let model = load(json!({"version": 4, "response_color": "default", "model": 7}))
+            .err()
+            .unwrap();
         assert!(model.message().contains("'model'"));
         let instructions =
-            load(json!({"version": 4, "response_color": "default", "instructions": 7}))
+            load(json!({"version": 4, "response_color": "default", "instructions": "loud"}))
                 .err()
                 .unwrap();
         assert!(instructions.message().contains("instructions"));
     }
 
     #[test]
-    fn version_3_keeps_the_default_color_and_normalizes_the_model() {
-        let prefixed = format!("cerebras/{}", cerebras::default_model());
-        let config = load(json!({"version": 3, "model": prefixed, "reasoning": null})).unwrap();
+    fn a_missing_model_uses_the_default() {
+        let config = load(json!({"version": 4, "response_color": "default"})).unwrap();
         assert_eq!(config.model(), Some(cerebras::default_model()));
         assert_eq!(config.reasoning(), None);
-        assert_eq!(config.response_color(), ResponseColor::Default);
-
-        let unset = load(json!({"version": 3})).unwrap();
-        assert_eq!(unset.model(), Some(cerebras::default_model()));
-    }
-
-    #[test]
-    fn version_2_migrates_the_selected_agent() {
-        let model = cerebras::default_model();
-        let config = load(json!({
-            "version": 2,
-            "agent": "cerebras",
-            "agents": {"cerebras": {"model": format!("cerebras/{model}"), "reasoning": "medium"}},
-            "instructions": "agent_default",
-        }))
-        .unwrap();
-        assert_eq!(config.model(), Some(model));
-        assert_eq!(config.reasoning(), Some("medium"));
-        assert_eq!(config.instructions(), &Instructions::AgentDefault);
-
-        // An unknown model keeps the defaults rather than failing.
-        let unknown = load(json!({"version": 2, "model": "gpt-2"})).unwrap();
-        assert_eq!(unknown.model(), Config::default().model());
-    }
-
-    #[test]
-    fn version_1_reads_legacy_instructions() {
-        let none = load(json!({"version": 1})).unwrap();
-        assert_eq!(none.instructions(), &Instructions::AgentDefault);
-        let custom = load(json!({"instructions": {"custom": "hi"}})).unwrap();
-        assert_eq!(
-            custom.instructions(),
-            &Instructions::Custom("hi".to_owned())
-        );
+        assert_eq!(config.instructions(), &Instructions::Concise);
     }
 }

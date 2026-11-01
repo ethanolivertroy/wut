@@ -68,15 +68,11 @@ impl Session {
     }
 
     fn from_json(value: &Value) -> Result<Self> {
-        let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version > 2 {
-            return Err(Error::new(
-                format!("session version {version} requires a newer version of wut"),
-                "run 'wut --upgrade'",
-            ));
-        }
-        if version == 0 {
-            return Err(invalid_session("session version 0 is not supported"));
+        let version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+        if version != 2 {
+            return Err(invalid_session(format!(
+                "session version {version} is not supported"
+            )));
         }
         let string = |key: &str| {
             value[key]
@@ -104,7 +100,6 @@ impl Session {
 
         let harness_session_id = value
             .get("harness_session_id")
-            .or_else(|| value.get("native_session_id"))
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_session("missing or invalid 'harness_session_id'"))?
             .to_owned();
@@ -146,12 +141,6 @@ fn save_to(directory: &Path, session: &Session) -> Result<()> {
     storage::write_private(&destination, &bytes, "session")
 }
 
-fn import_session(directory: &Path, session: &Session) -> Result<bool> {
-    let destination = session_path(directory, session)?;
-    let bytes = session_bytes(session)?;
-    storage::write_private_if_absent(&destination, &bytes, "session")
-}
-
 fn session_path(directory: &Path, session: &Session) -> Result<PathBuf> {
     Ok(directory.join(format!(
         "{}.json",
@@ -182,8 +171,7 @@ fn delete_from(directory: &Path, session: &Session) -> Result<()> {
 }
 
 pub fn latest(cwd: &Path) -> Result<Session> {
-    let (directory, legacy) = directories()?;
-    migrate_legacy(&directory, legacy.as_deref())?;
+    let directory = directory()?;
     latest_from(&directory, &cwd.to_string_lossy())?.ok_or_else(|| {
         Error::new(
             "no saved sessions for this folder",
@@ -244,8 +232,7 @@ fn warn_skipped(skipped: &[Error]) {
 }
 
 pub fn load_all() -> Result<Vec<Session>> {
-    let (directory, legacy) = directories()?;
-    migrate_legacy(&directory, legacy.as_deref())?;
+    let directory = directory()?;
     load_from(&directory)
 }
 
@@ -310,45 +297,12 @@ fn load_session(path: &Path) -> Result<Session> {
         .map_err(|error| error.context(format!("invalid session '{}'", path.display())))
 }
 
-fn load_legacy_from(directory: &Path) -> Result<Vec<Session>> {
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
-    let entries = fs::read_dir(directory).map_err(|error| {
-        Error::new(
-            format!(
-                "could not read legacy session directory '{}': {error}",
-                directory.display()
-            ),
-            "check its permissions and try again",
-        )
-    })?;
-    let mut sessions = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                return None;
-            }
-            let bytes = fs::read(path).ok()?;
-            let value: Value = serde_json::from_slice(&bytes).ok()?;
-            Session::from_json(&value).ok()
-        })
-        .collect::<Vec<_>>();
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    Ok(sessions)
-}
-
 pub fn directory() -> Result<PathBuf> {
-    Ok(directories()?.0)
-}
-
-fn directories() -> Result<(PathBuf, Option<PathBuf>)> {
     if let Some(path) = std::env::var_os("WUT_STATE_DIR").filter(|value| !value.is_empty()) {
-        return Ok((PathBuf::from(path).join("sessions"), None));
+        return Ok(PathBuf::from(path).join("sessions"));
     }
     if let Some(path) = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        let root = PathBuf::from(path);
-        return Ok((root.join("wut/sessions"), Some(root.join("ask/sessions"))));
+        return Ok(PathBuf::from(path).join("wut/sessions"));
     }
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -358,22 +312,7 @@ fn directories() -> Result<(PathBuf, Option<PathBuf>)> {
                 "set XDG_STATE_HOME to a writable directory and try again",
             )
         })?;
-    let root = PathBuf::from(home).join(".local/state");
-    Ok((root.join("wut/sessions"), Some(root.join("ask/sessions"))))
-}
-
-fn migrate_legacy(canonical: &Path, legacy: Option<&Path>) -> Result<()> {
-    let Some(legacy) = legacy.filter(|path| path.exists()) else {
-        return Ok(());
-    };
-    let marker = canonical.join(".legacy-imported");
-    if marker.exists() {
-        return Ok(());
-    }
-    for session in load_legacy_from(legacy)? {
-        import_session(canonical, &session)?;
-    }
-    storage::write_private(&marker, b"1\n", "session migration marker")
+    Ok(PathBuf::from(home).join(".local/state/wut/sessions"))
 }
 
 fn file_key(agent: &str, harness_session_id: &str) -> Result<String> {

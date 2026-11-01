@@ -6,15 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
 
+/// Writes `bytes` to `path` atomically with mode 600, creating missing
+/// directories with mode 700.
 pub fn write_private(path: &Path, bytes: &[u8], subject: &str) -> Result<()> {
-    write_private_inner(path, bytes, subject, true).map(drop)
-}
-
-pub fn write_private_if_absent(path: &Path, bytes: &[u8], subject: &str) -> Result<bool> {
-    write_private_inner(path, bytes, subject, false)
-}
-
-fn write_private_inner(path: &Path, bytes: &[u8], subject: &str, replace: bool) -> Result<bool> {
     let directory = parent_directory(path);
     if directory != Path::new(".") && !directory.exists() {
         let mut builder = fs::DirBuilder::new();
@@ -61,24 +55,12 @@ fn write_private_inner(path: &Path, bytes: &[u8], subject: &str, replace: bool) 
                 )
             })?;
 
-        if replace {
-            fs::rename(&temporary, path).map_err(|error| {
-                Error::new(
-                    format!("could not save {subject}: {error}"),
-                    format!("check '{}' permissions and try again", directory.display()),
-                )
-            })?;
-            return Ok(true);
-        }
-
-        match fs::hard_link(&temporary, path) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-            Err(error) => Err(Error::new(
+        fs::rename(&temporary, path).map_err(|error| {
+            Error::new(
                 format!("could not save {subject}: {error}"),
                 format!("check '{}' permissions and try again", directory.display()),
-            )),
-        }
+            )
+        })
     })();
 
     let _ = fs::remove_file(temporary);

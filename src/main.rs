@@ -3,7 +3,6 @@ mod cancel;
 mod cerebras;
 mod cli;
 mod config;
-mod environment;
 mod error;
 mod instructions;
 mod output;
@@ -105,11 +104,7 @@ fn run() -> Result<()> {
 fn update_checks_enabled(mode: &cli::Mode) -> bool {
     use std::io::{self, IsTerminal};
 
-    environment::canonical_or_legacy(
-        std::env::var_os("WUT_NO_UPDATE_CHECK"),
-        std::env::var_os("ASK_NO_UPDATE_CHECK"),
-    )
-    .is_none()
+    std::env::var_os("WUT_NO_UPDATE_CHECK").is_none()
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && io::stderr().is_terminal()

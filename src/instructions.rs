@@ -42,35 +42,12 @@ impl Instructions {
         }
     }
 
-    pub fn from_json(value: Option<&Value>, version: u64) -> Result<Self> {
-        match version {
-            1 => Self::from_v1_json(value),
-            2 => Self::from_v2_json(value),
-            _ => Err(Error::new(
-                format!("instruction version {version} is not supported"),
-                "run 'wut --upgrade'",
-            )),
-        }
-    }
-
-    fn from_v1_json(value: Option<&Value>) -> Result<Self> {
+    pub fn from_json(value: Option<&Value>) -> Result<Self> {
         match value {
-            None | Some(Value::Null) => Ok(Self::AgentDefault),
-            Some(Value::String(_)) => Ok(Self::Concise),
-            Some(Value::Object(value)) if value.len() == 1 => value["custom"]
-                .as_str()
-                .map(|value| Self::Custom(value.to_owned()))
-                .ok_or_else(invalid_instructions),
-            Some(_) => Err(invalid_instructions()),
-        }
-    }
-
-    fn from_v2_json(value: Option<&Value>) -> Result<Self> {
-        match value {
+            None => Ok(Self::Concise),
             Some(Value::Null) => Ok(Self::AgentDefault),
             Some(Value::String(value)) if value == "concise" => Ok(Self::Concise),
             Some(Value::String(value)) if value == "agent_default" => Ok(Self::AgentDefault),
-            None | Some(Value::String(_)) => Ok(Self::Concise),
             Some(Value::Object(value)) if value.len() == 1 => value["custom"]
                 .as_str()
                 .map(|value| Self::Custom(value.to_owned()))

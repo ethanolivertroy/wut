@@ -67,10 +67,6 @@ impl Drop for Spinner {
 pub fn enabled() -> bool {
     io::stdout().is_terminal()
         && io::stderr().is_terminal()
-        && crate::environment::canonical_or_legacy(
-            std::env::var_os("WUT_NO_SPINNER"),
-            std::env::var_os("ASK_NO_SPINNER"),
-        )
-        .is_none()
+        && std::env::var_os("WUT_NO_SPINNER").is_none()
         && std::env::var("TERM").is_ok_and(|term| term != "dumb")
 }

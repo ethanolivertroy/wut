@@ -26,10 +26,6 @@ brew tap ethanolivertroy/wut https://github.com/ethanolivertroy/wut
 brew install ethanolivertroy/wut/wut
 ```
 
-If you installed from the old `ethanolivertroy/tap`, switch once:
-`brew uninstall wut && brew untap ethanolivertroy/tap`, then run the two
-commands above.
-
 The installer works too, and it can save your API key for you:
 
 ```sh
