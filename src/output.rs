@@ -42,6 +42,15 @@ impl TurnOutput {
         }
     }
 
+    /// The text streamed since the last tool call was narration, not the
+    /// answer. A terminal redraws it in gray; a pipe never printed it.
+    pub fn dim_round(&mut self) -> Result<()> {
+        match &mut self.kind {
+            TurnOutputKind::Raw(_) => Ok(()),
+            TurnOutputKind::Rich(output) => output.dim_round(),
+        }
+    }
+
     pub fn finish(mut self, fallback: &str) -> Result<()> {
         if let TurnOutputKind::Rich(output) = &mut self.kind
             && !self.streamed

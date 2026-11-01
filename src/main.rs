@@ -2,6 +2,7 @@ mod agent;
 mod cancel;
 mod cerebras;
 mod cli;
+mod clock;
 mod config;
 mod error;
 mod instructions;
@@ -418,7 +419,7 @@ fn run_turn(
     response_color: config::ResponseColor,
 ) -> Result<String> {
     cancel::reset();
-    let mut output = TurnOutput::new(decorate, response_color);
+    let output = std::cell::RefCell::new(TurnOutput::new(decorate, response_color));
     let spinner_enabled = decorate && spinner::enabled();
     let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
     let show_tools = std::io::IsTerminal::is_terminal(&std::io::stderr());
@@ -427,20 +428,25 @@ fn run_turn(
         cwd,
         &mut |delta| {
             spinner.borrow_mut().stop();
-            output.push(delta)
+            output.borrow_mut().push(delta)
         },
         // Every tool call is shown, so a reply never reads files or searches
         // the web out of sight.
         &mut |call| {
+            spinner.borrow_mut().stop();
+            // Whatever streamed before the first tool call of a round was
+            // the model narrating its next step, so set it apart from the
+            // answer. Later calls in the round find nothing left to dim.
+            let _ = output.borrow_mut().dim_round();
             if show_tools {
                 let mut spinner = spinner.borrow_mut();
-                spinner.stop();
                 eprintln!("{}", dim(&format!("· {call}"), decorate));
                 *spinner = spinner::Spinner::start(spinner_enabled);
             }
         },
     );
     spinner.borrow_mut().stop();
+    let output = output.into_inner();
     let notice = agent.take_notice();
     let result = match answer {
         Ok(answer) => output.finish(&answer).map(|()| answer),
