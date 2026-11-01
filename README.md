@@ -30,7 +30,9 @@ Package managers do not save an API key: export `CEREBRAS_API_KEY`, or write the
 key to `~/.config/wut/credentials` (mode 600).
 
 Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
-normally with no Exa dependency.
+normally with no Exa dependency. Once a question has read file contents, wut
+refuses web searches for the rest of that question, so a search query can't
+carry your files off the machine.
 
 Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
 Jev model triage each question before it reaches Cerebras. One fast System One
