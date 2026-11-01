@@ -1,0 +1,241 @@
+name: Release
+
+# Pushing a vX.Y.Z tag builds and publishes the GitHub release, then publishes
+# the crate to crates.io and the npm wrapper (npm/) to npm, and points the
+# Homebrew formula (Formula/wut.rb) at the new binaries. crates.io and npm use
+# trusted publishing, so no registry tokens are stored.
+#
+# Run it by hand with an existing tag to retry a failed publish. Steps that
+# already happened are skipped.
+on:
+    push:
+        tags: ["v*"]
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: Existing tag to release, such as v0.0.5
+                required: true
+
+permissions:
+    contents: read
+
+env:
+    RUST_VERSION: "1.88.0"
+    TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+    build:
+        name: Build ${{ matrix.target }}
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: ubuntu-24.04
+                      target: x86_64-unknown-linux-musl
+                    - runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-musl
+                    - runner: macos-15-intel
+                      target: x86_64-apple-darwin
+                    - runner: macos-15
+                      target: aarch64-apple-darwin
+
+        env:
+            MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
+            - name: Verify tag matches Cargo.toml
+              shell: bash
+              run: |
+                  crate_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+                  [[ "$crate_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                  test "$TAG" = "v$crate_version"
+            - name: Install release Rust
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
+                  rustup default "$RUST_VERSION"
+            - name: Install musl linker
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes musl-tools
+                  case "${{ matrix.target }}" in
+                    x86_64-*)
+                      echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                    aarch64-*)
+                      echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                  esac
+            - name: Test
+              run: cargo test --locked --target "${{ matrix.target }}"
+            - name: Build
+              run: cargo build --locked --release --target "${{ matrix.target }}"
+            - name: Package
+              shell: bash
+              run: |
+                  target="${{ matrix.target }}"
+                  package="$RUNNER_TEMP/package"
+                  mkdir -p "$package" dist
+                  cp "target/$target/release/wut" README.md LICENSE "$package/"
+                  chmod 755 "$package/wut"
+                  "$package/wut" -V | grep -Fx "${TAG#v}"
+                  "$package/wut" --version | grep -Fx "${TAG#v}"
+                  tar -C "$package" -czf "dist/wut-$target.tar.gz" wut README.md LICENSE
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: release-${{ matrix.target }}
+                  path: dist/*.tar.gz
+                  if-no-files-found: error
+
+    release:
+        name: Publish GitHub release
+        needs: build
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  pattern: release-*
+                  path: dist
+                  merge-multiple: true
+            - name: Create checksums
+              shell: bash
+              run: |
+                  test "$(find dist -maxdepth 1 -name 'wut-*.tar.gz' | wc -l)" -eq 4
+                  cd dist
+                  for archive in wut-*.tar.gz; do
+                    sha256sum "$archive" > "$archive.sha256"
+                  done
+            - name: Publish release
+              env:
+                  GH_REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                    gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+                    gh release edit "$TAG" --draft=false --latest
+                  else
+                    gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+                      --verify-tag --generate-notes --latest
+                  fi
+
+    crate:
+        name: Publish to crates.io
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            # Trusted publishing: crates.io trades this workflow's OIDC identity
+            # for a short-lived token, so no registry token is stored.
+            id-token: write
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
+            - name: Check whether this version is already published
+              id: published
+              shell: bash
+              run: |
+                  version="${TAG#v}"
+                  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+                    -A 'wut release (github.com/ethanolivertroy/wut)' \
+                    "https://crates.io/api/v1/crates/wut/$version")"
+                  echo "crates.io answered $status for wut $version"
+                  if [ "$status" = 200 ]; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Install release Rust
+              if: steps.published.outputs.skip != 'true'
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal
+                  rustup default "$RUST_VERSION"
+            - uses: rust-lang/crates-io-auth-action@v1
+              if: steps.published.outputs.skip != 'true'
+              id: auth
+            - name: Publish
+              if: steps.published.outputs.skip != 'true'
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+              run: cargo publish --locked
+
+    npm:
+        name: Publish to npm
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            # Trusted publishing, as for the crate. npmjs.com must list this
+            # repository and release.yml as the trusted publisher for wut-cli.
+            id-token: write
+        defaults:
+            run:
+                working-directory: npm
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
+            - name: Check whether this version is already published
+              id: published
+              run: |
+                  version="${TAG#v}"
+                  if npm view "wut-cli@$version" version 2>/dev/null | grep -Fxq "$version"; then
+                    echo "wut-cli $version is already on npm"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  fi
+            # Trusted publishing needs npm >= 11.5.1, newer than Node 24 ships.
+            - uses: actions/setup-node@v4
+              if: steps.published.outputs.skip != 'true'
+              with:
+                  node-version: "24"
+                  registry-url: "https://registry.npmjs.org"
+            - name: Update npm
+              if: steps.published.outputs.skip != 'true'
+              run: npm install --global npm@latest
+            - name: Set the version
+              if: steps.published.outputs.skip != 'true'
+              run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
+            - run: npm test
+              if: steps.published.outputs.skip != 'true'
+            - name: Publish
+              if: steps.published.outputs.skip != 'true'
+              run: |
+                  # setup-node writes an empty _authToken line, and npm treats
+                  # even an empty credential as a token, so it would skip OIDC.
+                  sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+                  npm publish --access public --provenance
+
+    formula:
+        name: Update Homebrew formula and npm version
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: main
+            - name: Point the formula and npm/package.json at this release
+              run: |
+                  version="${TAG#v}"
+                  sh scripts/bump-formula.sh "$version"
+                  (cd npm && npm version "$version" --no-git-tag-version --allow-same-version)
+            - name: Commit to main
+              run: |
+                  if git diff --quiet; then
+                    echo "already at ${TAG#v}"
+                    exit 0
+                  fi
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git commit -am "Point Homebrew and npm at ${TAG#v}"
+                  git push origin HEAD:main

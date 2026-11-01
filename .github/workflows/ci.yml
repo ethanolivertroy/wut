@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - Cargo.toml
+      - Cargo.lock
+      - README.md
+      - LICENSE
+      - "assets/**"
+      - install.sh
+      - "npm/**"
+      - "Formula/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.rs"
+      - Cargo.toml
+      - Cargo.lock
+      - README.md
+      - LICENSE
+      - "assets/**"
+      - install.sh
+      - "npm/**"
+      - "Formula/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install shellcheck
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+      - name: Install stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Lint installer
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh
+
+  msrv:
+    name: Rust 1.88 minimum
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: cargo +1.88.0 test --locked
+
+  npm:
+    name: npm wrapper (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        working-directory: npm
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - run: npm test
+      - run: npm pack --dry-run
+
+  formula:
+    name: Homebrew formula
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install from this checkout's formula
+        run: |
+          brew tap ethanolivertroy/wut "$GITHUB_WORKSPACE"
+          brew install ethanolivertroy/wut/wut
+          wut --version
