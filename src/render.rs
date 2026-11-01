@@ -76,6 +76,7 @@ impl<W: Write> TerminalRenderer<W> {
     }
 
     fn line(&mut self, line: &str) -> Result<()> {
+        let line: &str = &printable(line);
         if let Some(block) = &mut self.code {
             if line.trim_start().starts_with("```") {
                 let block = self.code.take().expect("code block exists");
@@ -228,6 +229,25 @@ impl<W: Write> TerminalRenderer<W> {
     }
 }
 
+/// The line with control characters removed, so model output, which can
+/// echo text from a prompt injection, cannot move the cursor, change
+/// colors, set the window title or write the clipboard. Tabs become four
+/// spaces so code blocks keep their width.
+fn printable(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.chars().any(char::is_control) {
+        return line.into();
+    }
+    let mut clean = String::with_capacity(line.len());
+    for character in line.chars() {
+        if character == '\t' {
+            clean.push_str("    ");
+        } else if !character.is_control() {
+            clean.push(character);
+        }
+    }
+    clean.into()
+}
+
 fn list_item(line: &str) -> Option<(bool, &str)> {
     let trimmed = line.trim_start_matches(' ');
     let content = trimmed
@@ -290,4 +310,99 @@ fn render_inline(line: &str, base_color: &str) -> String {
         remaining = &after_open[close + marker.len()..];
     }
     rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TerminalRenderer, printable};
+    use crate::config::ResponseColor;
+
+    fn render(chunks: &[&str], color: ResponseColor) -> String {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::with_writer(&mut output, color);
+        for chunk in chunks {
+            renderer.push(chunk).unwrap();
+        }
+        renderer.finish().unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    /// The rendered text with our own color codes removed.
+    fn plain(text: &str) -> String {
+        let mut plain = String::new();
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character == '\x1b' {
+                chars.by_ref().find(|c| *c == 'm');
+            } else {
+                plain.push(character);
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn streamed_chunks_render_like_the_whole_answer() {
+        let answer = "# Title\nSome **bold** and `code`.\n- one\n  - nested\n1. first\n";
+        let whole = render(&[answer], ResponseColor::Default);
+        let pieces: Vec<String> = answer.chars().map(String::from).collect();
+        let pieces: Vec<&str> = pieces.iter().map(String::as_str).collect();
+        assert_eq!(render(&pieces, ResponseColor::Default), whole);
+        assert_eq!(
+            plain(&whole),
+            "Title\nSome bold and code.\n  • one\n    - nested\n  1. first\n"
+        );
+    }
+
+    #[test]
+    fn code_blocks_are_boxed_even_when_left_open() {
+        let closed = plain(&render(&["```sh\nls -la\n```\n"], ResponseColor::Default));
+        assert_eq!(closed, "┌ sh ────┐\n│ ls -la │\n└────────┘\n");
+        let open = plain(&render(&["```\nab"], ResponseColor::Default));
+        assert_eq!(open, "┌────┐\n│ ab │\n└────┘\n");
+    }
+
+    #[test]
+    fn markdown_inside_code_blocks_is_left_alone() {
+        let text = plain(&render(
+            &["```\n# not a heading\n- not a list\n```\n"],
+            ResponseColor::Default,
+        ));
+        assert!(text.contains("│ # not a heading │"), "{text}");
+        assert!(text.contains("│ - not a list    │"), "{text}");
+    }
+
+    #[test]
+    fn rules_quotes_and_unclosed_markers() {
+        let text = plain(&render(
+            &["---\n> quoted\nhalf **open\n"],
+            ResponseColor::Default,
+        ));
+        assert_eq!(text, "────────────────────────\n│ quoted\nhalf **open\n");
+    }
+
+    #[test]
+    fn a_response_color_wraps_each_line() {
+        let red = ResponseColor::Red.ansi();
+        let text = render(&["hello\n"], ResponseColor::Red);
+        assert_eq!(text, format!("{red}hello\x1b[0m\n"));
+    }
+
+    #[test]
+    fn ends_the_last_line() {
+        assert_eq!(
+            render(&["no newline"], ResponseColor::Default),
+            "no newline\n"
+        );
+        assert_eq!(render(&[], ResponseColor::Default), "");
+    }
+
+    #[test]
+    fn control_characters_never_reach_the_terminal() {
+        let hostile = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\u{9b}31md\r\n";
+        let text = render(&[hostile, "```\n\tx\n```\n"], ResponseColor::Default);
+        assert!(text.starts_with("a]52;c;ZXZpbA==b[2Jc31md\n"), "{text:?}");
+        assert!(plain(&text).contains("│     x │"), "{text:?}");
+        assert_eq!(printable("plain"), "plain");
+    }
 }
