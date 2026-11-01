@@ -12,6 +12,9 @@ use crate::typesafe;
 
 const MAX_TURNS: usize = 12;
 const TRIAGE_EXCHANGES: usize = 2;
+const WEB_SEARCH_BLOCKED: &str = "web_search is unavailable after workspace files have been read \
+     in this question, so file contents cannot leave the machine; answer from what you have and \
+     suggest the user ask about the web separately";
 
 pub struct Agent {
     client: Client,
@@ -90,6 +93,7 @@ impl Agent {
         let effort = self.turn_effort(plan.effort);
         let start = self.messages.len();
         self.messages.push(Message::text(Role::User, question));
+        let mut read_files = false;
         for _ in 0..MAX_TURNS {
             crate::cancel::check()?;
             let tools = tools::catalog(plan.tools.union(tools_in_history(&self.messages)));
@@ -101,7 +105,7 @@ impl Agent {
                 on_delta,
             )?;
             if outcome.tool_calls.is_empty() {
-                if outcome.content.is_empty() {
+                if outcome.content.trim().is_empty() {
                     return Err(Error::new(
                         "the model completed without returning an answer",
                         "try again; if it keeps happening, lower the reasoning level",
@@ -116,7 +120,7 @@ impl Agent {
                     .push(Message::text(Role::Assistant, outcome.content.clone()));
                 return Ok(outcome.content);
             }
-            self.apply_tool_turn(outcome, root, on_tool)?;
+            self.apply_tool_turn(outcome, root, on_tool, &mut read_files)?;
         }
         Err(Error::new(
             format!("the model used tools more than {MAX_TURNS} times without answering"),
@@ -160,6 +164,7 @@ impl Agent {
         outcome: Outcome,
         root: &Path,
         on_tool: &mut dyn FnMut(&str),
+        read_files: &mut bool,
     ) -> Result<()> {
         let mut assistant = Message::text(Role::Assistant, outcome.content);
         assistant.tool_calls = outcome.tool_calls.clone();
@@ -167,7 +172,20 @@ impl Agent {
         for call in outcome.tool_calls {
             crate::cancel::check()?;
             let arguments = parse_arguments(&call.arguments);
-            on_tool(&tools::describe_call(&call.name, &arguments));
+            let description = tools::describe_call(&call.name, &arguments);
+            // A search query leaves the machine, so once this question has
+            // read file contents a query could carry them out, for example
+            // when a file holds a prompt injection. Refuse the search instead.
+            if call.name == "web_search" && *read_files {
+                on_tool(&format!("{description} (blocked: files were read)"));
+                self.messages
+                    .push(Message::tool_result(call.id, WEB_SEARCH_BLOCKED.to_owned()));
+                continue;
+            }
+            on_tool(&description);
+            if tools::reads_contents(&call.name) {
+                *read_files = true;
+            }
             let content = match tools::execute(&call.name, &arguments, root) {
                 Ok(content) => content,
                 Err(error) => error.message().to_owned(),
@@ -383,5 +401,83 @@ mod tests {
         );
         assert!(!requests[2].contains("\"tool\""), "{}", requests[2]);
         assert!(requests[2].contains("two files"));
+    }
+
+    fn test_agent(base: &str) -> Agent {
+        Agent {
+            client: Client::for_test(base),
+            model: "gpt-oss-120b".to_owned(),
+            effort: None,
+            auto_effort: false,
+            triage: None,
+            notice: None,
+            messages: Vec::new(),
+        }
+    }
+
+    fn tool_call(name: &str, arguments: &str) -> String {
+        let call = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":"c1","function":{"name":name,"arguments":arguments}}
+        ]}}]});
+        sse(&[&call.to_string()])
+    }
+
+    #[test]
+    fn web_search_is_refused_after_files_are_read() {
+        let root = tempdir();
+        std::fs::write(root.join("notes.txt"), "secret plan").unwrap();
+        let (base, server) = serve(vec![
+            tool_call("read", r#"{"path":"notes.txt"}"#),
+            tool_call("web_search", r#"{"query":"secret plan"}"#),
+            sse(&[r#"{"choices":[{"delta":{"content":"done"}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        let mut tools = Vec::new();
+        let answer = agent
+            .ask("summarize notes", &root, &mut |_| Ok(()), &mut |call| {
+                tools.push(call.to_owned())
+            })
+            .unwrap();
+        assert_eq!(answer, "done");
+        assert_eq!(
+            tools,
+            [
+                "read notes.txt",
+                "web search \"secret plan\" (blocked: files were read)"
+            ]
+        );
+        let requests = server.join().unwrap();
+        assert!(
+            requests[2].contains("web_search is unavailable"),
+            "{}",
+            requests[2]
+        );
+    }
+
+    #[test]
+    fn a_blank_answer_is_an_error() {
+        let (base, server) = serve(vec![sse(&[
+            r#"{"choices":[{"delta":{"content":"\n\n  \n"}}]}"#,
+        ])]);
+        let mut agent = test_agent(&base);
+        let error = agent
+            .ask("hi", &std::env::temp_dir(), &mut |_| Ok(()), &mut |_| {})
+            .unwrap_err();
+        assert!(error.message().contains("without returning an answer"));
+        assert!(agent.messages.is_empty(), "a failed turn is not kept");
+        server.join().unwrap();
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wut-agent-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
     }
 }

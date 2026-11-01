@@ -147,6 +147,11 @@ const ENV_EXAMPLES: &[&str] = &[".env.example", ".env.sample", ".env.template"];
 const EXA_API_URL: &str = "https://api.exa.ai/search";
 const EXA_API_KEY: &str = "EXA_API_KEY";
 const WEB_SEARCH_RESULTS: u8 = 5;
+/// Whether a tool returns file contents rather than only names.
+pub fn reads_contents(name: &str) -> bool {
+    matches!(name, "read" | "grep")
+}
+
 const WEB_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn execute(name: &str, arguments: &Value, root: &Path) -> Result<String> {
