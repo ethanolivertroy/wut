@@ -1,6 +1,6 @@
 {
   "name": "wut-cli",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "description": "A tiny, fast terminal assistant powered by Cerebras (installs the wut binary)",
   "bin": {
     "wut": "bin/wut.js"
