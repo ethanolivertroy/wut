@@ -19,6 +19,11 @@ pub struct TerminalRenderer<W = io::Stdout> {
     list_active: bool,
     list_has_children: bool,
     response_color: ResponseColor,
+    /// Plain text written since the model's current round began, so the
+    /// round can be redrawn as narration if it ends in tool calls.
+    round: String,
+    /// Terminal (columns, rows); `None` asks the terminal.
+    size: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -44,7 +49,43 @@ impl<W: Write> TerminalRenderer<W> {
             list_active: false,
             list_has_children: false,
             response_color,
+            round: String::new(),
+            size: None,
         }
+    }
+
+    /// Redraws everything streamed in this round in gray, because the round
+    /// ended in tool calls and so was narration ("Let me check the config.")
+    /// rather than the answer. Blank lines are dropped. Output taller than the
+    /// screen is left as it is, since the cursor can't reach it.
+    pub fn dim_round(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.line(&line)?;
+        }
+        if let Some(block) = self.code.take() {
+            self.draw_code(block)?;
+        }
+        self.list_active = false;
+        self.list_has_children = false;
+        let written = std::mem::take(&mut self.round);
+        if written.is_empty() {
+            return Ok(());
+        }
+        let Some((columns, rows)) = self.size.or_else(terminal_size) else {
+            return Ok(());
+        };
+        let used = rows_used(&written, columns);
+        if used == 0 || used >= rows {
+            return Ok(());
+        }
+        let mut redraw = format!("\x1b[{used}F\x1b[J");
+        for line in written.lines().filter(|line| !line.trim().is_empty()) {
+            redraw.push_str(&format!("{DARK_GRAY}{}{RESET}\n", line.trim_end()));
+        }
+        self.write(&redraw)?;
+        self.round.clear();
+        Ok(())
     }
 
     pub fn push(&mut self, text: &str) -> Result<()> {
@@ -77,6 +118,11 @@ impl<W: Write> TerminalRenderer<W> {
 
     fn line(&mut self, line: &str) -> Result<()> {
         let line: &str = &printable(line);
+        // Models often open a round with blank lines; skip them so the text
+        // starts right under the prompt or the last tool line.
+        if self.code.is_none() && self.round.is_empty() && line.trim().is_empty() {
+            return Ok(());
+        }
         if let Some(block) = &mut self.code {
             if line.trim_start().starts_with("```") {
                 let block = self.code.take().expect("code block exists");
@@ -218,6 +264,7 @@ impl<W: Write> TerminalRenderer<W> {
             Ok(()) => {
                 self.wrote = true;
                 self.ends_with_newline = text.ends_with('\n');
+                self.round.push_str(&without_colors(text));
                 Ok(())
             }
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
@@ -227,6 +274,33 @@ impl<W: Write> TerminalRenderer<W> {
             )),
         }
     }
+}
+
+fn terminal_size() -> Option<(usize, usize)> {
+    let (columns, rows) = crossterm::terminal::size().ok()?;
+    (columns > 0 && rows > 0).then_some((usize::from(columns), usize::from(rows)))
+}
+
+/// Terminal rows taken by `text`, counting lines that wrap.
+fn rows_used(text: &str, columns: usize) -> usize {
+    text.split_terminator('\n')
+        .map(|line| UnicodeWidthStr::width(line).div_ceil(columns).max(1))
+        .sum()
+}
+
+/// `text` without the color codes this renderer writes. Model output has
+/// had its control characters removed, so these are the only escapes.
+fn without_colors(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character == '\x1b' {
+            characters.by_ref().find(|character| *character == 'm');
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
 }
 
 /// The line with control characters removed, so model output, which can
@@ -314,7 +388,7 @@ fn render_inline(line: &str, base_color: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalRenderer, printable};
+    use super::{TerminalRenderer, printable, rows_used};
     use crate::config::ResponseColor;
 
     fn render(chunks: &[&str], color: ResponseColor) -> String {
@@ -404,5 +478,58 @@ mod tests {
         assert!(text.starts_with("a]52;c;ZXZpbA==b[2Jc31md\n"), "{text:?}");
         assert!(plain(&text).contains("│     x │"), "{text:?}");
         assert_eq!(printable("plain"), "plain");
+    }
+
+    fn sized(output: &mut Vec<u8>, columns: usize, rows: usize) -> TerminalRenderer<&mut Vec<u8>> {
+        let mut renderer = TerminalRenderer::with_writer(output, ResponseColor::Default);
+        renderer.size = Some((columns, rows));
+        renderer
+    }
+
+    #[test]
+    fn narration_is_redrawn_gray_and_the_answer_is_not() {
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 24);
+        renderer
+            .push("\n\nLet me check `main.rs`.\n\nOne moment")
+            .unwrap();
+        renderer.dim_round().unwrap();
+        renderer.push("\n\nIt's in **main**.\n").unwrap();
+        renderer.finish().unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let (streamed, rest) = text.split_once("\x1b[3F\x1b[J").expect("moves up 3 rows");
+        assert!(streamed.contains("Let me check"), "{streamed:?}");
+        assert!(
+            rest.starts_with("\x1b[90mLet me check main.rs.\x1b[0m\n\x1b[90mOne moment\x1b[0m\n"),
+            "{rest:?}"
+        );
+        assert!(rest.ends_with("It's in \x1b[1mmain\x1b[0m.\n"), "{rest:?}");
+    }
+
+    #[test]
+    fn nothing_to_dim_writes_nothing() {
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 24);
+        renderer.dim_round().unwrap();
+        renderer.finish().unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn narration_taller_than_the_screen_is_left_alone() {
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 3);
+        renderer.push("one\ntwo\nthree\n").unwrap();
+        renderer.dim_round().unwrap();
+        renderer.finish().unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn counts_wrapped_rows() {
+        assert_eq!(rows_used("\n", 10), 1);
+        assert_eq!(rows_used("abcdefghij\n", 10), 1);
+        assert_eq!(rows_used("abcdefghijk\n\nxy\n", 10), 4);
+        assert_eq!(rows_used("界界界界界界\n", 10), 2);
     }
 }
