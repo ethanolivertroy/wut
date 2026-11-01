@@ -4,11 +4,11 @@ use crate::config::ResponseColor;
 use crate::error::{Error, Result};
 use crate::render::TerminalRenderer;
 
-#[derive(Default)]
-struct RawStream {
-    wrote: bool,
-    ends_with_newline: bool,
-}
+/// Output for a pipe or a file. Nothing is streamed: a turn that calls
+/// tools streams the model's narration ("Let me search…") before the tool
+/// calls, so only the final answer is written, matching what the session
+/// saves.
+struct RawStream;
 
 pub struct TurnOutput {
     kind: TurnOutputKind,
@@ -26,7 +26,7 @@ impl TurnOutput {
             kind: if rich {
                 TurnOutputKind::Rich(TerminalRenderer::new(response_color))
             } else {
-                TurnOutputKind::Raw(RawStream::default())
+                TurnOutputKind::Raw(RawStream)
             },
             streamed: false,
         }
@@ -57,32 +57,24 @@ impl TurnOutput {
 }
 
 impl RawStream {
-    fn push(&mut self, delta: &str) -> Result<()> {
-        if delta.is_empty() {
-            return Ok(());
-        }
-        self.wrote = true;
-        self.ends_with_newline = delta.ends_with('\n');
-        write_stdout(&[delta.as_bytes()])
+    fn push(&mut self, _delta: &str) -> Result<()> {
+        Ok(())
     }
 
-    fn finish(&self, fallback: &str) -> Result<()> {
-        if !self.wrote {
-            print_answer(fallback)
-        } else if !self.ends_with_newline {
-            write_stdout(&[b"\n"])
-        } else {
-            Ok(())
+    fn finish(&self, answer: &str) -> Result<()> {
+        let answer = plain_answer(answer);
+        if answer.is_empty() {
+            return Ok(());
         }
+        write_stdout(&[answer.as_bytes(), b"\n"])
     }
 }
 
-fn print_answer(answer: &str) -> Result<()> {
-    if answer.ends_with('\n') {
-        write_stdout(&[answer.as_bytes()])
-    } else {
-        write_stdout(&[answer.as_bytes(), b"\n"])
-    }
+/// The answer without the blank lines models often put around it.
+fn plain_answer(answer: &str) -> &str {
+    answer
+        .trim_matches(|character: char| character == '\n' || character == '\r')
+        .trim_end()
 }
 
 pub fn write_stdout(parts: &[&[u8]]) -> Result<()> {
@@ -100,4 +92,19 @@ pub fn write_stdout(parts: &[&[u8]]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plain_answer;
+
+    #[test]
+    fn plain_answer_drops_surrounding_blank_lines_only() {
+        assert_eq!(
+            plain_answer("\n\n  indented\nline  \n\n"),
+            "  indented\nline"
+        );
+        assert_eq!(plain_answer("\r\n\n"), "");
+        assert_eq!(plain_answer("done"), "done");
+    }
 }
