@@ -418,3 +418,111 @@ fn config_paths(root: &Path) -> (PathBuf, PathBuf) {
 fn invalid_config(message: impl Into<String>) -> Error {
     Error::new(message, "fix or remove the config file, then try again")
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{Config, ResponseColor};
+    use crate::cerebras;
+    use crate::instructions::Instructions;
+
+    fn load(value: Value) -> crate::error::Result<Config> {
+        Config::from_value(&value)
+    }
+
+    #[test]
+    fn saved_config_loads_back_unchanged() {
+        let mut config = Config::default();
+        config.set_model(Some(cerebras::default_model().to_owned()));
+        config.set_reasoning(Some("high".to_owned()));
+        config.set_response_color(ResponseColor::CatppuccinMauve);
+        config.set_instructions(Instructions::Custom("be terse".to_owned()));
+        let saved: Value = serde_json::from_slice(&config.bytes().unwrap()).unwrap();
+        assert_eq!(saved["version"], 4);
+
+        let loaded = load(saved).unwrap();
+        assert_eq!(loaded.model(), Some(cerebras::default_model()));
+        assert_eq!(loaded.reasoning(), Some("high"));
+        assert_eq!(loaded.response_color(), ResponseColor::CatppuccinMauve);
+        assert_eq!(
+            loaded.instructions(),
+            &Instructions::Custom("be terse".to_owned())
+        );
+    }
+
+    #[test]
+    fn every_response_color_round_trips_by_id() {
+        for color in ResponseColor::ALL {
+            assert_eq!(ResponseColor::parse(color.id()), Some(color));
+        }
+        assert_eq!(ResponseColor::parse("chartreuse"), None);
+    }
+
+    #[test]
+    fn rejects_versions_it_cannot_read() {
+        let newer = load(json!({"version": 5})).err().unwrap();
+        assert!(newer.message().contains("newer version of wut"));
+        let zero = load(json!({"version": 0})).err().unwrap();
+        assert!(zero.message().contains("version 0"));
+    }
+
+    #[test]
+    fn rejects_invalid_fields() {
+        let color = load(json!({"version": 4, "response_color": "chartreuse"}))
+            .err()
+            .unwrap();
+        assert!(color.message().contains("response_color"));
+        let missing_color = load(json!({"version": 4})).err().unwrap();
+        assert!(missing_color.message().contains("response_color"));
+        let model = load(json!({"version": 3, "model": 7})).err().unwrap();
+        assert!(model.message().contains("'model'"));
+        let instructions =
+            load(json!({"version": 4, "response_color": "default", "instructions": 7}))
+                .err()
+                .unwrap();
+        assert!(instructions.message().contains("instructions"));
+    }
+
+    #[test]
+    fn version_3_keeps_the_default_color_and_normalizes_the_model() {
+        let prefixed = format!("cerebras/{}", cerebras::default_model());
+        let config = load(json!({"version": 3, "model": prefixed, "reasoning": null})).unwrap();
+        assert_eq!(config.model(), Some(cerebras::default_model()));
+        assert_eq!(config.reasoning(), None);
+        assert_eq!(config.response_color(), ResponseColor::Default);
+
+        let unset = load(json!({"version": 3})).unwrap();
+        assert_eq!(unset.model(), Some(cerebras::default_model()));
+    }
+
+    #[test]
+    fn version_2_migrates_the_selected_agent() {
+        let model = cerebras::default_model();
+        let config = load(json!({
+            "version": 2,
+            "agent": "cerebras",
+            "agents": {"cerebras": {"model": format!("cerebras/{model}"), "reasoning": "medium"}},
+            "instructions": "agent_default",
+        }))
+        .unwrap();
+        assert_eq!(config.model(), Some(model));
+        assert_eq!(config.reasoning(), Some("medium"));
+        assert_eq!(config.instructions(), &Instructions::AgentDefault);
+
+        // An unknown model keeps the defaults rather than failing.
+        let unknown = load(json!({"version": 2, "model": "gpt-2"})).unwrap();
+        assert_eq!(unknown.model(), Config::default().model());
+    }
+
+    #[test]
+    fn version_1_reads_legacy_instructions() {
+        let none = load(json!({"version": 1})).unwrap();
+        assert_eq!(none.instructions(), &Instructions::AgentDefault);
+        let custom = load(json!({"instructions": {"custom": "hi"}})).unwrap();
+        assert_eq!(
+            custom.instructions(),
+            &Instructions::Custom("hi".to_owned())
+        );
+    }
+}
