@@ -42,10 +42,7 @@ impl Agent {
                 cerebras::find_model(&model)
                     .and_then(|model| model.default_reasoning.map(str::to_owned))
             });
-        let mut messages = Vec::new();
-        if let Some(prompt) = instructions.prompt() {
-            messages.push(Message::text(Role::System, prompt));
-        }
+        let mut messages = vec![Message::text(Role::System, system_prompt(instructions))];
         for turn in history {
             messages.push(Message::text(Role::User, turn.user.clone()));
             messages.push(Message::text(Role::Assistant, turn.assistant.clone()));
@@ -196,6 +193,43 @@ impl Agent {
     }
 }
 
+/// The configured instructions plus today's date. Without the date the model
+/// assumes it is still the year its training data ends in.
+fn system_prompt(instructions: &Instructions) -> String {
+    let date = format!("Today's date is {} (UTC).", today_utc());
+    match instructions.prompt() {
+        Some(prompt) => format!("{prompt}\n\n{date}"),
+        None => date,
+    }
+}
+
+fn today_utc() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    civil_date(seconds / 86_400)
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01, as YYYY-MM-DD.
+/// Howard Hinnant's days-to-civil algorithm.
+fn civil_date(days: u64) -> String {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 fn parse_arguments(raw: &str) -> Value {
     if raw.trim().is_empty() {
         return Value::Object(serde_json::Map::new());
@@ -239,7 +273,27 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
 
-    use super::{Agent, recent_exchanges, tools_in_history};
+    use super::{Agent, civil_date, recent_exchanges, system_prompt, tools_in_history};
+    use crate::instructions::Instructions;
+
+    #[test]
+    fn civil_dates_match_the_calendar() {
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(11_016), "2000-02-29");
+        assert_eq!(civil_date(11_017), "2000-03-01");
+        assert_eq!(civil_date(20_758), "2026-11-01");
+        assert_eq!(civil_date(20_818), "2026-12-31");
+        assert_eq!(civil_date(47_541), "2100-03-01");
+    }
+
+    #[test]
+    fn the_system_prompt_always_carries_the_date() {
+        let concise = system_prompt(&Instructions::Concise);
+        assert!(concise.starts_with("Be friendly"), "{concise}");
+        assert!(concise.contains("Today's date is "), "{concise}");
+        let bare = system_prompt(&Instructions::AgentDefault);
+        assert!(bare.starts_with("Today's date is "), "{bare}");
+    }
     use crate::cerebras::{Client, Message, Role, ToolCall};
     use crate::tools::ToolSet;
 
