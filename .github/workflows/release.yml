@@ -1,14 +1,26 @@
 name: Release
 
+# Pushing a vX.Y.Z tag builds, publishes the GitHub release and publishes the
+# crate. The Homebrew tap and the npm wrapper (wut-npm) each check for a new
+# release every 15 minutes and publish themselves; no tokens are stored.
+#
+# Run it by hand with an existing tag to retry a failed publish. Steps that
+# already happened are skipped.
 on:
     push:
         tags: ["v*"]
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: Existing tag to release, such as v0.0.5
+                required: true
 
 permissions:
     contents: read
 
 env:
     RUST_VERSION: "1.88.0"
+    TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
     build:
@@ -32,12 +44,14 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
             - name: Verify tag matches Cargo.toml
               shell: bash
               run: |
                   crate_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
                   [[ "$crate_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-                  test "$GITHUB_REF_NAME" = "v$crate_version"
+                  test "$TAG" = "v$crate_version"
             - name: Install release Rust
               run: |
                   rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
@@ -68,8 +82,8 @@ jobs:
                   mkdir -p "$package" dist
                   cp "target/$target/release/wut" README.md LICENSE "$package/"
                   chmod 755 "$package/wut"
-                  "$package/wut" -V | grep -Fx "${GITHUB_REF_NAME#v}"
-                  "$package/wut" --version | grep -Fx "${GITHUB_REF_NAME#v}"
+                  "$package/wut" -V | grep -Fx "${TAG#v}"
+                  "$package/wut" --version | grep -Fx "${TAG#v}"
                   tar -C "$package" -czf "dist/wut-$target.tar.gz" wut README.md LICENSE
             - uses: actions/upload-artifact@v7
               with:
@@ -77,8 +91,8 @@ jobs:
                   path: dist/*.tar.gz
                   if-no-files-found: error
 
-    draft:
-        name: Create draft release
+    release:
+        name: Publish GitHub release
         needs: build
         runs-on: ubuntu-24.04
         permissions:
@@ -98,11 +112,55 @@ jobs:
                   for archive in wut-*.tar.gz; do
                     sha256sum "$archive" > "$archive.sha256"
                   done
-            - name: Create draft release
+            - name: Publish release
               env:
                   GH_REPO: ${{ github.repository }}
                   GH_TOKEN: ${{ github.token }}
               run: |
-                  gh release create "$GITHUB_REF_NAME" \
-                    dist/*.tar.gz dist/*.sha256 \
-                    --draft --verify-tag --generate-notes
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                    gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+                    gh release edit "$TAG" --draft=false --latest
+                  else
+                    gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+                      --verify-tag --generate-notes --latest
+                  fi
+
+    crate:
+        name: Publish to crates.io
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            # Trusted publishing: crates.io trades this workflow's OIDC identity
+            # for a short-lived token, so no registry token is stored.
+            id-token: write
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
+            - name: Check whether this version is already published
+              id: published
+              shell: bash
+              run: |
+                  version="${TAG#v}"
+                  status="$(curl -sS -o /dev/null -w '%{http_code}' \
+                    -A 'wut release (github.com/ethanolivertroy/wut)' \
+                    "https://crates.io/api/v1/crates/wut/$version")"
+                  echo "crates.io answered $status for wut $version"
+                  if [ "$status" = 200 ]; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Install release Rust
+              if: steps.published.outputs.skip != 'true'
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal
+                  rustup default "$RUST_VERSION"
+            - uses: rust-lang/crates-io-auth-action@v1
+              if: steps.published.outputs.skip != 'true'
+              id: auth
+            - name: Publish
+              if: steps.published.outputs.skip != 'true'
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+              run: cargo publish --locked
