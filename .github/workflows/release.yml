@@ -1,8 +1,9 @@
 name: Release
 
-# Pushing a vX.Y.Z tag builds, publishes the GitHub release and publishes the
-# crate. The Homebrew tap and the npm wrapper (wut-npm) each check for a new
-# release every 15 minutes and publish themselves; no tokens are stored.
+# Pushing a vX.Y.Z tag builds and publishes the GitHub release, then publishes
+# the crate to crates.io and the npm wrapper (npm/) to npm, and points the
+# Homebrew formula (Formula/wut.rb) at the new binaries. crates.io and npm use
+# trusted publishing, so no registry tokens are stored.
 #
 # Run it by hand with an existing tag to retry a failed publish. Steps that
 # already happened are skipped.
@@ -164,3 +165,77 @@ jobs:
               env:
                   CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
               run: cargo publish --locked
+
+    npm:
+        name: Publish to npm
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            # Trusted publishing, as for the crate. npmjs.com must list this
+            # repository and release.yml as the trusted publisher for wut-cli.
+            id-token: write
+        defaults:
+            run:
+                working-directory: npm
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.TAG }}
+            - name: Check whether this version is already published
+              id: published
+              run: |
+                  version="${TAG#v}"
+                  if npm view "wut-cli@$version" version 2>/dev/null | grep -Fxq "$version"; then
+                    echo "wut-cli $version is already on npm"
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  fi
+            # Trusted publishing needs npm >= 11.5.1, newer than Node 24 ships.
+            - uses: actions/setup-node@v4
+              if: steps.published.outputs.skip != 'true'
+              with:
+                  node-version: "24"
+                  registry-url: "https://registry.npmjs.org"
+            - name: Update npm
+              if: steps.published.outputs.skip != 'true'
+              run: npm install --global npm@latest
+            - name: Set the version
+              if: steps.published.outputs.skip != 'true'
+              run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
+            - run: npm test
+              if: steps.published.outputs.skip != 'true'
+            - name: Publish
+              if: steps.published.outputs.skip != 'true'
+              run: |
+                  # setup-node writes an empty _authToken line, and npm treats
+                  # even an empty credential as a token, so it would skip OIDC.
+                  sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+                  npm publish --access public --provenance
+
+    formula:
+        name: Update Homebrew formula and npm version
+        needs: release
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: main
+            - name: Point the formula and npm/package.json at this release
+              run: |
+                  version="${TAG#v}"
+                  sh scripts/bump-formula.sh "$version"
+                  (cd npm && npm version "$version" --no-git-tag-version --allow-same-version)
+            - name: Commit to main
+              run: |
+                  if git diff --quiet; then
+                    echo "already at ${TAG#v}"
+                    exit 0
+                  fi
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git commit -am "Point Homebrew and npm at ${TAG#v}"
+                  git push origin HEAD:main
