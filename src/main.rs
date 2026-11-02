@@ -4,6 +4,7 @@ mod cerebras;
 mod cli;
 mod clock;
 mod config;
+mod diagram;
 mod error;
 mod instructions;
 mod output;
