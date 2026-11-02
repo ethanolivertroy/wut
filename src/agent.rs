@@ -196,12 +196,22 @@ impl Agent {
 /// The configured instructions plus today's date. Without the date the model
 /// assumes it is still the year its training data ends in.
 fn system_prompt(instructions: &Instructions) -> String {
-    let date = crate::clock::today();
+    let mut context = crate::clock::today();
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) && crate::diagram::images_supported() {
+        context.push_str(DIAGRAMS);
+    }
     match instructions.prompt() {
-        Some(prompt) => format!("{prompt}\n\n{date}"),
-        None => date,
+        Some(prompt) => format!("{prompt}\n\n{context}"),
+        None => context,
     }
 }
+
+/// Added when the terminal can show the diagrams wut draws from ```mermaid
+/// blocks, so piped answers and other terminals don't get diagram source.
+const DIAGRAMS: &str = " This terminal draws ```mermaid code blocks as diagrams. \
+     When a diagram explains something better than prose, such as a flow, a sequence of \
+     messages, an architecture or a state machine, include one as a ```mermaid block, \
+     keep it small, and still answer in words.";
 
 fn parse_arguments(raw: &str) -> Value {
     if raw.trim().is_empty() {

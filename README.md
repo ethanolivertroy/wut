@@ -64,3 +64,13 @@ wut --settings            # configure
 
 In a chat, Ctrl-C stops the current answer; Ctrl-D or Ctrl-C on an empty line
 exits.
+
+## Diagrams
+
+In terminals that show images through the Kitty graphics protocol (Rex,
+Ghostty, Kitty, WezTerm), wut draws diagrams: when a flow, a sequence or an
+architecture is easier to see than to read, the answer includes a Mermaid
+diagram and wut renders it inline with [Pele](https://pele.run). Piped output
+and other terminals get the Mermaid text instead. Set `WUT_IMAGES=0` to turn
+diagrams off, or `WUT_IMAGES=1` to turn them on in a terminal wut doesn't
+recognize.

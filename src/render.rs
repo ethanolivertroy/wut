@@ -24,6 +24,10 @@ pub struct TerminalRenderer<W = io::Stdout> {
     round: String,
     /// Terminal (columns, rows); `None` asks the terminal.
     size: Option<(usize, usize)>,
+    /// Draw ```mermaid blocks as images.
+    images: bool,
+    /// The round drew an image, whose rows can't be counted to redraw it.
+    round_has_image: bool,
 }
 
 #[derive(Default)]
@@ -34,7 +38,9 @@ struct CodeBlock {
 
 impl TerminalRenderer<io::Stdout> {
     pub fn new(response_color: ResponseColor) -> Self {
-        Self::with_writer(io::stdout(), response_color)
+        let mut renderer = Self::with_writer(io::stdout(), response_color);
+        renderer.images = crate::diagram::images_supported();
+        renderer
     }
 }
 
@@ -51,6 +57,8 @@ impl<W: Write> TerminalRenderer<W> {
             response_color,
             round: String::new(),
             size: None,
+            images: false,
+            round_has_image: false,
         }
     }
 
@@ -69,7 +77,7 @@ impl<W: Write> TerminalRenderer<W> {
         self.list_active = false;
         self.list_has_children = false;
         let written = std::mem::take(&mut self.round);
-        if written.is_empty() {
+        if std::mem::take(&mut self.round_has_image) || written.is_empty() {
             return Ok(());
         }
         let Some((columns, rows)) = self.size.or_else(terminal_size) else {
@@ -222,6 +230,51 @@ impl<W: Write> TerminalRenderer<W> {
     }
 
     fn draw_code(&mut self, block: CodeBlock) -> Result<()> {
+        if self.images && block.language.eq_ignore_ascii_case("mermaid") {
+            let columns = self
+                .size
+                .or_else(terminal_size)
+                .map_or(80, |(columns, _)| columns)
+                .saturating_sub(1);
+            match crate::diagram::draw(&block.lines.join("\n"), columns) {
+                Ok(escapes) => return self.write_image(&escapes),
+                Err(reason) => {
+                    self.draw_box(block)?;
+                    return self.write(&format!(
+                        "{DARK_GRAY}· diagram couldn't be drawn: {}{RESET}\n",
+                        printable(&reason)
+                    ));
+                }
+            }
+        }
+        self.draw_box(block)
+    }
+
+    /// Writes an image's escapes, then ends the line under it. The image isn't
+    /// text, so it stays out of the round's text and marks the round as one
+    /// that can't be redrawn.
+    fn write_image(&mut self, escapes: &str) -> Result<()> {
+        match self
+            .output
+            .write_all(escapes.as_bytes())
+            .and_then(|()| self.output.write_all(b"\n"))
+            .and_then(|()| self.output.flush())
+        {
+            Ok(()) => {
+                self.wrote = true;
+                self.ends_with_newline = true;
+                self.round_has_image = true;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(error) => Err(Error::new(
+                format!("could not write output: {error}"),
+                "check the output destination and try again",
+            )),
+        }
+    }
+
+    fn draw_box(&mut self, block: CodeBlock) -> Result<()> {
         let content_width = block
             .lines
             .iter()
@@ -531,5 +584,62 @@ mod tests {
         assert_eq!(rows_used("abcdefghij\n", 10), 1);
         assert_eq!(rows_used("abcdefghijk\n\nxy\n", 10), 4);
         assert_eq!(rows_used("界界界界界界\n", 10), 2);
+    }
+
+    #[test]
+    fn mermaid_blocks_become_images_when_supported() {
+        let source = "```mermaid\nflowchart LR\n  A --> B\n```\n";
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 24);
+        renderer.images = true;
+        renderer.push(source).unwrap();
+        renderer.push("after\n").unwrap();
+        renderer.finish().unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.starts_with("\x1b_Ga=T,f=100,q=2,"),
+            "{:?}",
+            &text[..40]
+        );
+        assert!(
+            text.ends_with("\x1b\\\nafter\n"),
+            "{:?}",
+            &text[text.len() - 20..]
+        );
+        assert!(!text.contains("flowchart"), "the source isn't printed");
+
+        let boxed = plain(&render(&[source], ResponseColor::Default));
+        assert!(boxed.contains("│ flowchart LR │"), "{boxed}");
+    }
+
+    #[test]
+    fn a_broken_diagram_shows_its_source_and_the_reason() {
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 24);
+        renderer.images = true;
+        renderer
+            .push("```mermaid\nflowchart LR\n  A --> \n```\n")
+            .unwrap();
+        renderer.finish().unwrap();
+        let text = plain(&String::from_utf8(output).unwrap());
+        assert!(text.contains("│ flowchart LR │"), "{text}");
+        assert!(
+            text.contains("· diagram couldn't be drawn: Parse error on line 2"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_round_with_an_image_is_not_redrawn() {
+        let mut output = Vec::new();
+        let mut renderer = sized(&mut output, 80, 24);
+        renderer.images = true;
+        renderer
+            .push("Here:\n```mermaid\nflowchart LR\n  A --> B\n```\n")
+            .unwrap();
+        renderer.dim_round().unwrap();
+        renderer.finish().unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("\x1b[J"), "no redraw over an image");
     }
 }
