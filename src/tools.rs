@@ -320,18 +320,12 @@ fn read(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
             format!("'{}' is a directory; use ls", path.display()),
         ));
     }
-    let bytes = std::fs::read(&path).map_err(|error| {
+    let bytes = read_text_file(&path).map_err(|error| {
         tool_error(
             "read",
             format!("could not read '{}': {error}", path.display()),
         )
     })?;
-    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
-        return Err(tool_error(
-            "read",
-            format!("'{}' is not a readable text file", path.display()),
-        ));
-    }
     let mut content = String::from_utf8_lossy(&bytes).into_owned();
     if content.len() > MAX_OUTPUT_CHARS {
         content.truncate(char_floor(&content, MAX_OUTPUT_CHARS));
@@ -362,12 +356,9 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         if !glob.is_empty() && !glob_match(&glob, &file_name(&path)) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(bytes) = read_text_file(&path) else {
             continue;
         };
-        if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
-            continue;
-        }
         let content = String::from_utf8_lossy(&bytes);
         for (index, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
@@ -399,6 +390,31 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         ));
     }
     Ok(output)
+}
+
+/// Open only regular text files, and bound the actual read as well as the
+/// initial size check: a file can grow after its metadata was inspected.
+fn read_text_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let invalid = || Error::new(ErrorKind::InvalidData, "not a readable text file");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        // Do not block opening a FIFO or follow a swapped-in final symlink.
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES as u64 {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
+        return Err(invalid());
+    }
+    Ok(bytes)
 }
 
 fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<String> {
@@ -592,6 +608,14 @@ fn resolve(path: &str, root: &Path, tool: &str) -> Result<PathBuf> {
     } else {
         canonical_root.join(candidate)
     };
+    // Check the requested name before canonicalization erases it. A secret
+    // path such as .env may itself be an alias to an ordinary-looking file.
+    if is_denied(&joined) {
+        return Err(tool_error(
+            tool,
+            format!("'{path}' is a secret path and cannot be accessed"),
+        ));
+    }
     let target = joined
         .canonicalize()
         .map_err(|error| tool_error(tool, format!("could not open '{path}': {error}")))?;
@@ -784,6 +808,97 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn secret_named_symlinks_cannot_expose_innocuously_named_targets() {
+        use std::os::unix::fs::symlink;
+        let (base, workspace) = sandbox();
+        std::fs::write(workspace.join("config.txt"), "needle secret\n").unwrap();
+        symlink("config.txt", workspace.join(".env")).unwrap();
+        std::fs::create_dir(workspace.join("config")).unwrap();
+        std::fs::write(workspace.join("config/token.txt"), "needle secret\n").unwrap();
+        symlink("config", workspace.join(".ssh")).unwrap();
+
+        for path in [".env", ".ssh/token.txt"] {
+            for (tool, args) in [
+                ("read", json!({"path": path})),
+                ("grep", json!({"path": path, "pattern": "needle"})),
+            ] {
+                let error = run(tool, args, &workspace).unwrap_err();
+                assert!(error.contains("secret"), "{tool} {path}: {error}");
+            }
+        }
+        assert!(run("ls", json!({"path": ".ssh"}), &workspace).is_err());
+        // Ordinary in-workspace aliases are still supported.
+        symlink("src/main.rs", workspace.join("main.rs")).unwrap();
+        assert!(
+            run("read", json!({"path": "main.rs"}), &workspace)
+                .unwrap()
+                .contains("needle")
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_fifo_fails_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::Duration;
+        let (base, workspace) = sandbox();
+        let path = std::ffi::CString::new(workspace.join("pipe").as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a NUL-terminated filename in our test workspace.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(run("read", json!({"path": "pipe"}), &workspace));
+        });
+        let result = receive.recv_timeout(Duration::from_secs(2));
+        std::fs::remove_dir_all(base).unwrap();
+        let error = result.expect("read blocked on a FIFO").unwrap_err();
+        assert!(error.contains("not a readable text file"), "{error}");
+    }
+
+    #[test]
+    fn file_reads_enforce_size_and_text_limits() {
+        use std::io::{Seek, SeekFrom, Write};
+        let (base, workspace) = sandbox();
+        let file = workspace.join("large.txt");
+        // A sparse, oversized file must be rejected without loading it.
+        let mut sparse = std::fs::File::create(&file).unwrap();
+        sparse
+            .seek(SeekFrom::Start(super::MAX_FILE_BYTES as u64))
+            .unwrap();
+        sparse.write_all(b"x").unwrap();
+        assert!(run("read", json!({"path": "large.txt"}), &workspace).is_err());
+        assert_eq!(
+            run(
+                "grep",
+                json!({"path": "large.txt", "pattern": "x"}),
+                &workspace
+            )
+            .unwrap(),
+            "no matches"
+        );
+        std::fs::write(&file, vec![b'x'; super::MAX_FILE_BYTES]).unwrap();
+        assert!(
+            run("read", json!({"path": "large.txt"}), &workspace)
+                .unwrap()
+                .ends_with("[truncated]")
+        );
+        std::fs::write(&file, b"needle\0binary").unwrap();
+        assert!(run("read", json!({"path": "large.txt"}), &workspace).is_err());
+        assert_eq!(
+            run(
+                "grep",
+                json!({"path": "large.txt", "pattern": "needle"}),
+                &workspace
+            )
+            .unwrap(),
+            "no matches"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn secret_files_are_denied_in_any_case() {
         for path in [
@@ -841,14 +956,13 @@ mod tests {
             .unwrap(),
             "node_modules/pkg/hit.rs:1:needle"
         );
-        assert_eq!(
+        assert!(
             run(
                 "grep",
                 json!({"pattern": "needle", "path": ".ssh"}),
                 &workspace
             )
-            .unwrap(),
-            "no matches"
+            .is_err()
         );
         assert!(run("ls", json!({"path": ".ssh"}), &workspace).is_err());
         std::fs::remove_dir_all(base).unwrap();

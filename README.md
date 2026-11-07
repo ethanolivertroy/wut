@@ -47,6 +47,10 @@ normally with no Exa dependency. Once a question has read file contents, wut
 refuses web searches for the rest of that question, so a search query can't
 carry your files off the machine.
 
+Workspace tools read only regular text files up to 512 KiB. Secret paths such as
+`.env` and `.ssh` are blocked even when they are symlinks to ordinary-looking
+files or directories.
+
 Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
 Jev model triage each question before it reaches Cerebras. One fast System One
 request judges whether the question needs the workspace tools, whether it needs
