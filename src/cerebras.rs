@@ -192,6 +192,8 @@ pub struct Outcome {
 pub struct Client {
     api_key: String,
     base_url: String,
+    // Keep the agent's connection pool for tool rounds and chat follow-ups.
+    http: ureq::Agent,
 }
 
 impl Client {
@@ -200,6 +202,7 @@ impl Client {
         Self {
             api_key: "test".to_owned(),
             base_url: base_url.to_owned(),
+            http: http_agent(),
         }
     }
 
@@ -207,6 +210,7 @@ impl Client {
         Ok(Self {
             api_key: auth_key()?,
             base_url: DEFAULT_BASE_URL.to_owned(),
+            http: http_agent(),
         })
     }
 
@@ -219,11 +223,8 @@ impl Client {
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Outcome> {
         let body = request_body(messages, tools, model, effort);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(CONNECT_TIMEOUT)
-            .timeout_read(READ_TIMEOUT)
-            .build();
-        let response = agent
+        let response = self
+            .http
             .post(&format!("{}/chat/completions", self.base_url))
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
@@ -239,6 +240,13 @@ impl Client {
         let stream = EventStream::new(BufReader::new(response.into_reader()));
         collect_stream(stream, on_delta)
     }
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout_read(READ_TIMEOUT)
+        .build()
 }
 
 pub fn request_body(
@@ -554,6 +562,155 @@ fn api_status_error(status: u16, body: &str) -> Error {
 mod tests {
     use super::{EventStream, api_status_error, collect_stream};
     use crate::error::Result;
+
+    #[test]
+    fn consecutive_completions_reuse_an_available_http_connection() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut connection: Option<BufReader<TcpStream>> = None;
+            let mut connections = 0;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for _ in 0..2 {
+                let mut request_line = String::new();
+                loop {
+                    if let Some(reader) = &mut connection {
+                        if reader.read_line(&mut request_line).unwrap() > 0 {
+                            break;
+                        }
+                        connection = None;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for a completion"
+                    );
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_secs(2)))
+                                .unwrap();
+                            connection = Some(BufReader::new(stream));
+                            connections += 1;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("accept failed: {error}"),
+                    }
+                }
+                assert!(request_line.starts_with("POST /chat/completions "));
+                let reader = connection.as_mut().unwrap();
+                let mut length = None;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut request = vec![0; length.unwrap()];
+                reader.read_exact(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                assert_eq!(request["stream"], true);
+                let body = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+                reader.get_mut().flush().unwrap();
+            }
+            connections
+        });
+        let client = super::Client::for_test(&base_url);
+        for _ in 0..2 {
+            let outcome = client
+                .stream(&[], &[], super::DEFAULT_MODEL, None, &mut |_| Ok(()))
+                .unwrap();
+            assert_eq!(outcome.content, "Hi");
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "each completion opened a new connection"
+        );
+    }
+
+    #[test]
+    fn chunked_responses_stream_immediately_and_finish_at_done() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (signal, observed) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; length.unwrap()]).unwrap();
+            let socket = reader.get_mut();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            let first = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n";
+            write!(socket, "{:x}\r\n{first}\r\n", first.len()).unwrap();
+            socket.flush().unwrap();
+            // The client must deliver the first delta before we finish SSE.
+            assert_eq!(
+                observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "delta"
+            );
+            let done = "data: [DONE]\n\n";
+            write!(socket, "{:x}\r\n{done}\r\n", done.len()).unwrap();
+            socket.flush().unwrap();
+            // Waiting for HTTP EOF just to recycle a connection would hold
+            // up an otherwise complete answer. Finish at the SSE marker.
+            assert_eq!(
+                observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "done"
+            );
+        });
+        let client = super::Client::for_test(&base_url);
+        let mut deltas = String::new();
+        let outcome = client
+            .stream(&[], &[], super::DEFAULT_MODEL, None, &mut |delta| {
+                deltas.push_str(delta);
+                signal.send("delta").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        signal.send("done").unwrap();
+        assert_eq!(deltas, "Hi");
+        assert_eq!(outcome.content, "Hi");
+        server.join().unwrap();
+    }
 
     struct CredentialsFixture(std::path::PathBuf);
 
