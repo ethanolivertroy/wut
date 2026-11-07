@@ -1,6 +1,6 @@
 # wut
 
-A tiny, fast terminal assistant powered by Cerebras. Ask a quick question, recall
+A tiny, fast terminal assistant powered by Cerebras or Groq. Ask a quick question, recall
 a command, or let it inspect your current workspace. It cannot edit files or run
 commands.
 
@@ -10,7 +10,8 @@ https://github.com/user-attachments/assets/2c1c2660-7630-4688-80a2-8beebeacf2c0
 
 
 
-Requires a [Cerebras API key](https://cloud.cerebras.ai/).
+Requires a [Cerebras API key](https://cloud.cerebras.ai/) or a
+[Groq API key](https://console.groq.com/keys).
 
 ## Install
 
@@ -41,6 +42,34 @@ the `credentials` file inside it to mode 600. If `XDG_CONFIG_HOME` is set, wut u
 the same protections: wut refuses files or directories accessible to other users,
 symlinks at either of those two paths, files owned by another user, and hard-linked
 credential files. Environment credentials take priority over saved credentials.
+
+For Groq, set `GROQ_API_KEY` in the process environment. Groq never uses your
+Cerebras key or its saved credentials file. Choose a model in `wut --settings`,
+or pass its ID before a question:
+
+```sh
+wut --models
+wut --model groq:openai/gpt-oss-20b "how do I find the process on port 3000?"
+wut --model gpt-oss-120b --reasoning low "why is this failing?"
+```
+
+The Groq choices are GPT-OSS 20B and 120B, both with low reasoning by default.
+`--reasoning medium` or `high` spends more time thinking; `auto` uses the optional
+TypeSafe integration. Command-line model choices leave your saved defaults
+unchanged. A continued chat remembers its model unless you override it.
+
+Use `wut --benchmark --model groq:openai/gpt-oss-20b` to send three small test
+requests and emit JSON lines with `first_text_ms`, `total_ms`, and `output_chars`.
+Without `--model`, it tries the catalog and reports unavailable credentials or
+failed requests explicitly. Each test request has a 15-second deadline. This
+measures direct inference with streaming, without triage or workspace tools;
+first-text latency includes any model reasoning before visible text. It does
+not equate provider-advertised token throughput with response latency.
+
+Model IDs and protocol options were checked against the
+[Groq model catalog](https://console.groq.com/docs/models),
+[Groq reasoning guide](https://console.groq.com/docs/reasoning), and
+[Cerebras catalog](https://inference-docs.cerebras.ai/models/overview).
 
 Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
 normally with no Exa dependency. Once a question has read file contents, wut

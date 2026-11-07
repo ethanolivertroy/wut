@@ -33,7 +33,11 @@ impl Agent {
         instructions: &Instructions,
         history: &[Turn],
     ) -> Result<Self> {
-        let model = cerebras::resolve_model(model).to_owned();
+        let selected = cerebras::require_model(model.unwrap_or(cerebras::default_model()))?;
+        if let Some(level) = effort {
+            selected.validate_reasoning(level)?;
+        }
+        let model = selected.id.to_owned();
         let auto_effort = effort == Some(triage::AUTO_REASONING);
         let effort = effort
             .filter(|_| !auto_effort)
@@ -48,7 +52,7 @@ impl Agent {
             messages.push(Message::text(Role::Assistant, turn.assistant.clone()));
         }
         Ok(Self {
-            client: Client::new()?,
+            client: Client::new(&model)?,
             model,
             effort,
             auto_effort,
@@ -440,6 +444,43 @@ mod tests {
             notice: None,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn groq_can_read_a_workspace_file_and_stream_the_answer() {
+        let root = tempdir();
+        std::fs::write(root.join("notes.txt"), "the build command is cargo test").unwrap();
+        let (base, server) = serve(vec![
+            tool_call("read", r#"{"path":"notes.txt"}"#),
+            sse(&[r#"{"choices":[{"delta":{"content":"Run cargo test."}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        agent.client = Client::for_provider_test(&base, crate::cerebras::Provider::Groq);
+        agent.model = "groq:openai/gpt-oss-20b".to_owned();
+        agent.effort = Some("low".to_owned());
+        let mut streamed = String::new();
+        let answer = agent
+            .ask(
+                "how do I test this?",
+                &root,
+                &mut |delta| {
+                    streamed.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(answer, "Run cargo test.");
+        assert_eq!(streamed, answer);
+        let requests = server.join().unwrap();
+        for request in &requests {
+            let value: serde_json::Value = serde_json::from_str(request).unwrap();
+            assert_eq!(value["model"], "openai/gpt-oss-20b");
+            assert_eq!(value["reasoning_effort"], "low");
+            assert_eq!(value["include_reasoning"], false);
+        }
+        assert!(requests[1].contains("the build command is cargo test"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn tool_call(name: &str, arguments: &str) -> String {

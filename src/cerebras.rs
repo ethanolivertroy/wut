@@ -17,6 +17,7 @@ const CREDENTIALS_FILE: &str = "wut/credentials";
 pub const MODELS: &[Model] = &[
     Model {
         id: "gpt-oss-120b",
+        provider: Provider::Cerebras,
         name: "GPT OSS 120B",
         description: "Fastest, lowest-cost Cerebras text model",
         default_reasoning: Some("low"),
@@ -24,6 +25,7 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         id: "gemma-4-31b",
+        provider: Provider::Cerebras,
         name: "Gemma 4 31B",
         description: "Cerebras public endpoint · vision capable",
         default_reasoning: Some("none"),
@@ -31,19 +33,91 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         id: "qwen-3.8-27b",
+        provider: Provider::Cerebras,
         name: "Qwen 3.8 27B",
         description: "Cerebras public endpoint · configurable reasoning",
         default_reasoning: Some("high"),
         levels: &["none", "low", "medium", "high"],
     },
+    Model {
+        id: "groq:openai/gpt-oss-20b",
+        provider: Provider::Groq,
+        name: "GPT OSS 20B (Groq)",
+        description: "Groq · compact model for quick answers and tool use",
+        default_reasoning: Some("low"),
+        levels: &["low", "medium", "high"],
+    },
+    Model {
+        id: "groq:openai/gpt-oss-120b",
+        provider: Provider::Groq,
+        name: "GPT OSS 120B (Groq)",
+        description: "Groq · larger model for harder questions and tool use",
+        default_reasoning: Some("low"),
+        levels: &["low", "medium", "high"],
+    },
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Provider {
+    Cerebras,
+    Groq,
+}
+
+impl Provider {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cerebras => "Cerebras",
+            Self::Groq => "Groq",
+        }
+    }
+
+    pub fn env_key(self) -> &'static str {
+        match self {
+            Self::Cerebras => ENV_KEY,
+            Self::Groq => "GROQ_API_KEY",
+        }
+    }
+
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::Cerebras => DEFAULT_BASE_URL,
+            Self::Groq => "https://api.groq.com/openai/v1",
+        }
+    }
+}
 
 pub struct Model {
     pub id: &'static str,
+    pub provider: Provider,
     pub name: &'static str,
     pub description: &'static str,
     pub default_reasoning: Option<&'static str>,
     pub levels: &'static [&'static str],
+}
+
+impl Model {
+    pub fn api_id(&self) -> &'static str {
+        self.id.strip_prefix("groq:").unwrap_or(self.id)
+    }
+
+    pub fn validate_reasoning(&self, level: &str) -> Result<()> {
+        if level == crate::triage::AUTO_REASONING || self.levels.contains(&level) {
+            return Ok(());
+        }
+        Err(Error::new(
+            format!("reasoning '{level}' is not supported by {}", self.id),
+            format!("choose {} or auto", self.levels.join(", ")),
+        ))
+    }
+}
+
+pub fn require_model(id: &str) -> Result<&'static Model> {
+    find_model(id).ok_or_else(|| {
+        Error::new(
+            format!("unknown model '{id}'"),
+            "run 'wut --models' to list model IDs",
+        )
+    })
 }
 
 pub fn default_model() -> &'static str {
@@ -192,6 +266,7 @@ pub struct Outcome {
 pub struct Client {
     api_key: String,
     base_url: String,
+    provider: Provider,
     // Keep the agent's connection pool for tool rounds and chat follow-ups.
     http: ureq::Agent,
 }
@@ -199,19 +274,32 @@ pub struct Client {
 impl Client {
     #[cfg(test)]
     pub fn for_test(base_url: &str) -> Self {
+        Self::for_provider_test(base_url, Provider::Cerebras)
+    }
+
+    #[cfg(test)]
+    pub fn for_provider_test(base_url: &str, provider: Provider) -> Self {
         Self {
             api_key: "test".to_owned(),
             base_url: base_url.to_owned(),
+            provider,
             http: http_agent(),
         }
     }
 
-    pub fn new() -> Result<Self> {
+    pub fn new(model: &str) -> Result<Self> {
+        let provider = require_model(model)?.provider;
         Ok(Self {
-            api_key: auth_key()?,
-            base_url: DEFAULT_BASE_URL.to_owned(),
+            api_key: auth_key(provider)?,
+            base_url: provider.base_url().to_owned(),
+            provider,
             http: http_agent(),
         })
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.http = http_agent_with_timeout(Some(timeout));
+        self
     }
 
     pub fn stream(
@@ -222,6 +310,11 @@ impl Client {
         effort: Option<&str>,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Outcome> {
+        if require_model(model)?.provider != self.provider {
+            return Err(Error::internal(
+                "the selected model belongs to a different provider",
+            ));
+        }
         let body = request_body(messages, tools, model, effort);
         let response = self
             .http
@@ -243,10 +336,18 @@ impl Client {
 }
 
 fn http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
+    http_agent_with_timeout(None)
+}
+
+fn http_agent_with_timeout(timeout: Option<Duration>) -> ureq::Agent {
+    let builder = ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
-        .timeout_read(READ_TIMEOUT)
-        .build()
+        .timeout_read(READ_TIMEOUT);
+    match timeout {
+        Some(timeout) => builder.timeout(timeout),
+        None => builder,
+    }
+    .build()
 }
 
 pub fn request_body(
@@ -255,8 +356,13 @@ pub fn request_body(
     model: &str,
     effort: Option<&str>,
 ) -> Value {
+    let selected = find_model(model);
+    let api_model = match selected {
+        Some(model) => model.api_id(),
+        None => model,
+    };
     let mut body = json!({
-        "model": model,
+        "model": api_model,
         "messages": messages.iter().map(Message::to_json).collect::<Vec<_>>(),
         "stream": true,
     });
@@ -265,6 +371,9 @@ pub fn request_body(
     }
     if let Some(effort) = effort {
         body["reasoning_effort"] = Value::String(effort.to_owned());
+    }
+    if selected.is_some_and(|model| model.provider == Provider::Groq) {
+        body["include_reasoning"] = Value::Bool(false);
     }
     body
 }
@@ -414,19 +523,28 @@ impl<R: BufRead> EventStream<R> {
     }
 }
 
-fn auth_key() -> Result<String> {
-    if let Some(key) = std::env::var_os(ENV_KEY)
+fn auth_key(provider: Provider) -> Result<String> {
+    let env_key = provider.env_key();
+    if let Some(key) = std::env::var_os(env_key)
         .map(|value| value.to_string_lossy().into_owned())
         .filter(|value| !value.trim().is_empty())
     {
-        return Ok(key);
+        return Ok(key.trim().to_owned());
     }
-    if let Some(key) = key_from_credentials_file()? {
+    if provider == Provider::Cerebras
+        && let Some(key) = key_from_credentials_file()?
+    {
         return Ok(key);
     }
     Err(Error::new(
-        format!("no API key found (set ${ENV_KEY})"),
-        "rerun install.sh from a terminal to save one, or set CEREBRAS_API_KEY",
+        format!("no {} API key found (set ${env_key})", provider.name()),
+        if provider == Provider::Cerebras {
+            "rerun install.sh from a terminal to save one, or set CEREBRAS_API_KEY".to_owned()
+        } else {
+            format!(
+                "set {env_key} in the environment; credentials from another provider are never used"
+            )
+        },
     ))
 }
 
@@ -564,6 +682,94 @@ mod tests {
     use crate::error::Result;
 
     #[test]
+    fn groq_requests_use_the_provider_model_id_and_separate_reasoning() {
+        let model = super::require_model("groq:openai/gpt-oss-20b").unwrap();
+        assert_eq!(model.provider.env_key(), "GROQ_API_KEY");
+        assert_eq!(model.provider.base_url(), "https://api.groq.com/openai/v1");
+        assert_eq!(model.default_reasoning, Some("low"));
+        let body = super::request_body(
+            &[super::Message::text(super::Role::User, "hello")],
+            &crate::tools::catalog(crate::tools::ToolSet::default()),
+            model.id,
+            Some("low"),
+        );
+        assert_eq!(body["model"], "openai/gpt-oss-20b");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["include_reasoning"], false);
+        assert_eq!(body["stream"], true);
+        assert!(
+            body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "read")
+        );
+        assert!(
+            body.get("reasoning_format").is_none(),
+            "GPT-OSS does not support reasoning_format"
+        );
+        let cerebras = super::request_body(&[], &[], "gpt-oss-120b", Some("low"));
+        assert_eq!(cerebras["model"], "gpt-oss-120b");
+        assert!(cerebras.get("include_reasoning").is_none());
+    }
+
+    #[test]
+    fn unknown_models_and_unsupported_reasoning_are_explicit_errors() {
+        assert!(super::require_model("groq:not-a-model").is_err());
+        let model = super::require_model("groq:openai/gpt-oss-120b").unwrap();
+        assert!(model.validate_reasoning("none").is_err());
+        assert!(model.validate_reasoning("high").is_ok());
+        assert!(model.validate_reasoning("auto").is_ok());
+        let client = super::Client::for_test("http://127.0.0.1:1");
+        let error = client
+            .stream(&[], &[], model.id, None, &mut |_| Ok(()))
+            .unwrap_err();
+        assert!(error.message().contains("different provider"));
+    }
+
+    #[test]
+    fn a_total_deadline_bounds_a_stalled_streaming_body() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (finished, observed) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = Some(value.trim().parse::<usize>().unwrap());
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; length.unwrap()]).unwrap();
+            reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+            reader.get_mut().flush().unwrap();
+            // Keep the HTTP body open until the client's own deadline fires.
+            observed.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+        let client = super::Client::for_test(&base).with_timeout(Duration::from_millis(100));
+        assert!(
+            client
+                .stream(&[], &[], super::DEFAULT_MODEL, None, &mut |_| Ok(()))
+                .is_err()
+        );
+        finished.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn consecutive_completions_reuse_an_available_http_connection() {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::{TcpListener, TcpStream};
@@ -591,6 +797,9 @@ mod tests {
                     );
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            // macOS can inherit the listener's nonblocking
+                            // mode; this request reader deliberately blocks.
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_secs(2)))
                                 .unwrap();
