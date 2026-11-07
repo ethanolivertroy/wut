@@ -163,14 +163,25 @@ install_cerebras_key() {
   config_home="${XDG_CONFIG_HOME:-"$HOME/.config"}"
   credentials_dir="$config_home/wut"
   credentials="$credentials_dir/credentials"
+  [ ! -L "$credentials_dir" ] || error "credentials directory must not be a symlink"
+  [ ! -L "$credentials" ] || error "credentials file must not be a symlink"
+  if [ -e "$credentials" ] && [ ! -f "$credentials" ]; then
+    error "credentials must be a regular file"
+  fi
+  umask 077
+  mkdir -p "$credentials_dir"
+  chmod 700 "$credentials_dir"
+  if [ -f "$credentials" ]; then
+    chmod 600 "$credentials"
+  fi
   [ ! -s "$credentials" ] || return 0
 
   if [ ! -t 2 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-    printf '\nRerun install.sh from a terminal to securely save your Cerebras API key.\n' >&2
+    printf '\nSet CEREBRAS_API_KEY, or rerun install.sh from a terminal to save a key in a private plaintext file.\n' >&2
     return
   fi
 
-  printf '\nSave a Cerebras API key for wut now? [y/N] ' > /dev/tty
+  printf '\nSave a Cerebras API key in a private plaintext file (not encrypted)? [y/N] ' > /dev/tty
   IFS= read -r answer < /dev/tty || answer=''
   case "$answer" in
     y | Y | yes | YES | Yes) ;;
@@ -191,10 +202,8 @@ install_cerebras_key() {
   printf '\n' > /dev/tty
   [ -n "$key" ] || error "API key was empty"
 
-  umask 077
-  mkdir -p "$credentials_dir"
-  chmod 700 "$credentials_dir"
-  credentials_staged="$credentials.tmp.$$"
+  credentials_staged="$(mktemp "$credentials_dir/.credentials.XXXXXXXXXX")" ||
+    error "could not create a private credentials file"
   printf '%s\n' "$key" > "$credentials_staged"
   chmod 600 "$credentials_staged"
   mv -f "$credentials_staged" "$credentials"

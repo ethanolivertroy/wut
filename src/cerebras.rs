@@ -413,7 +413,7 @@ fn auth_key() -> Result<String> {
     {
         return Ok(key);
     }
-    if let Some(key) = key_from_credentials_file() {
+    if let Some(key) = key_from_credentials_file()? {
         return Ok(key);
     }
     Err(Error::new(
@@ -422,17 +422,90 @@ fn auth_key() -> Result<String> {
     ))
 }
 
-fn key_from_credentials_file() -> Option<String> {
+fn key_from_credentials_file() -> Result<Option<String>> {
     let path = if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
         std::path::PathBuf::from(config_home)
     } else {
-        std::path::PathBuf::from(std::env::var_os("HOME")?).join(".config")
+        let Some(home) = std::env::var_os("HOME") else {
+            return Ok(None);
+        };
+        std::path::PathBuf::from(home).join(".config")
     }
     .join(CREDENTIALS_FILE);
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|key| key.trim().to_owned())
-        .filter(|key| !key.is_empty())
+    read_credentials(&path)
+}
+
+fn read_credentials(path: &std::path::Path) -> Result<Option<String>> {
+    use std::fs::{File, OpenOptions};
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let invalid = || {
+        Error::new(
+            format!(
+                "refusing unsafe or unreadable credentials '{}'",
+                path.display()
+            ),
+            "use an owner-only directory (chmod 700) and a regular credentials file (chmod 600), owned by you with no symlinks or hard links; or set CEREBRAS_API_KEY",
+        )
+    };
+    let Some(parent) = path.parent() else {
+        return Err(invalid());
+    };
+    let directory = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)
+    {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid()),
+    };
+    // Pin the directory before opening its entry, so a renamed directory
+    // cannot swap in a different credentials file after these checks.
+    let metadata = directory.metadata().map_err(|_| invalid())?;
+    // SAFETY: geteuid has no arguments or memory requirements.
+    let uid = unsafe { libc::geteuid() };
+    if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+        return Err(invalid());
+    }
+    // SAFETY: the directory descriptor and static, NUL-terminated filename
+    // remain valid for the call. O_NONBLOCK prevents a FIFO from hanging us.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c"credentials".as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return if std::io::Error::last_os_error().kind() == ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    // SAFETY: openat returned a fresh descriptor that this File now owns.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o077 != 0
+        || metadata.nlink() != 1
+        || metadata.len() > 4096
+    {
+        return Err(invalid());
+    }
+    let mut key = String::new();
+    file.take(4097)
+        .read_to_string(&mut key)
+        .map_err(|_| invalid())?;
+    if key.len() > 4096 {
+        return Err(invalid());
+    }
+    let key = key.trim();
+    Ok((!key.is_empty()).then(|| key.to_owned()))
 }
 
 fn api_error(error: ureq::Error) -> Error {
@@ -481,6 +554,133 @@ fn api_status_error(status: u16, body: &str) -> Error {
 mod tests {
     use super::{EventStream, api_status_error, collect_stream};
     use crate::error::Result;
+
+    struct CredentialsFixture(std::path::PathBuf);
+
+    impl CredentialsFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "wut-credentials-test-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            Self(path)
+        }
+
+        fn write(&self, contents: &[u8], mode: u32) -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join("credentials");
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        }
+    }
+
+    impl Drop for CredentialsFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn private_credentials_load_and_missing_or_empty_credentials_do_not() {
+        let fixture = CredentialsFixture::new();
+        assert_eq!(
+            super::read_credentials(&fixture.0.join("credentials")).unwrap(),
+            None
+        );
+        let path = fixture.write(b"  test-secret\n", 0o600);
+        assert_eq!(
+            super::read_credentials(&path).unwrap().as_deref(),
+            Some("test-secret")
+        );
+        fixture.write(b" \n", 0o600);
+        assert_eq!(super::read_credentials(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn credentials_require_private_file_and_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = CredentialsFixture::new();
+        for mode in [0o644, 0o640, 0o620, 0o604] {
+            let path = fixture.write(b"test-secret", mode);
+            let error = super::read_credentials(&path).unwrap_err();
+            assert!(!error.to_string().contains("test-secret"));
+        }
+        let path = fixture.write(b"test-secret", 0o600);
+        for mode in [0o755, 0o750, 0o720] {
+            std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(super::read_credentials(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn credentials_reject_symlinks_and_hard_links() {
+        use std::os::unix::fs::symlink;
+        let fixture = CredentialsFixture::new();
+        let target = fixture.write(b"test-secret", 0o600);
+        let alias = fixture.0.join("alias");
+        symlink(&fixture.0, &alias).unwrap();
+        assert!(super::read_credentials(&alias.join("credentials")).is_err());
+        std::fs::rename(&target, fixture.0.join("original")).unwrap();
+        symlink("original", &target).unwrap();
+        assert!(super::read_credentials(&target).is_err());
+        std::fs::remove_file(&target).unwrap();
+        std::fs::hard_link(fixture.0.join("original"), &target).unwrap();
+        assert!(super::read_credentials(&target).is_err());
+    }
+
+    #[test]
+    fn credentials_reject_directories_and_fifos_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = CredentialsFixture::new();
+        let path = fixture.0.join("credentials");
+        std::fs::create_dir(&path).unwrap();
+        assert!(super::read_credentials(&path).is_err());
+        std::fs::remove_dir(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path in our private test directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(super::read_credentials(&path).is_err());
+    }
+
+    #[test]
+    fn credentials_reject_oversized_and_non_utf8_files() {
+        let fixture = CredentialsFixture::new();
+        for bytes in [vec![b'x'; 4097], vec![0xff]] {
+            let path = fixture.write(&bytes, 0o600);
+            assert!(super::read_credentials(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn credentials_reject_foreign_ownership() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = CredentialsFixture::new();
+        let path = fixture.write(b"test-secret", 0o600);
+        // Only root can construct a file owned by another uid for this test.
+        // SAFETY: geteuid has no arguments or memory requirements.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path to our test file.
+        assert_eq!(unsafe { libc::chown(name.as_ptr(), 1, 1) }, 0);
+        assert!(super::read_credentials(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(fixture.0.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path to our test directory.
+        assert_eq!(unsafe { libc::chown(name.as_ptr(), 1, 1) }, 0);
+        assert!(super::read_credentials(&path).is_err());
+    }
 
     fn collect(body: &str) -> (Result<super::Outcome>, String) {
         let mut streamed = String::new();

@@ -32,8 +32,15 @@ The installer works too, and it can save your API key for you:
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanolivertroy/wut/main/install.sh | sh
 ```
 
-Package managers do not save an API key: export `CEREBRAS_API_KEY`, or write the
-key to `~/.config/wut/credentials` (mode 600).
+Package managers do not save an API key. Set `CEREBRAS_API_KEY` in the process
+environment to avoid saving a key through wut, or use the installer's optional
+credential prompt. Saved keys are **plaintext, not encrypted or stored in an OS
+keychain**. The installer restricts the `~/.config/wut` directory to mode 700 and
+the `credentials` file inside it to mode 600. If `XDG_CONFIG_HOME` is set, wut uses
+`$XDG_CONFIG_HOME/wut/credentials` instead. Manually created credentials must have
+the same protections: wut refuses files or directories accessible to other users,
+symlinks at either of those two paths, files owned by another user, and hard-linked
+credential files. Environment credentials take priority over saved credentials.
 
 Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
 normally with no Exa dependency. Once a question has read file contents, wut
