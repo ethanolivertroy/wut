@@ -57,7 +57,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Test credential installation
+      - run: cargo build --locked
+      - name: Test CLI providers and credential installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Lint installer
         if: runner.os == 'Linux'

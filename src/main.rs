@@ -1,4 +1,5 @@
 mod agent;
+mod benchmark;
 mod cancel;
 mod cerebras;
 mod cli;
@@ -44,7 +45,11 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    let mode = cli::parse(std::env::args_os().skip(1))?;
+    let cli::Invocation {
+        mode,
+        model,
+        reasoning,
+    } = cli::parse(std::env::args_os().skip(1))?;
     let update_check = update_check::Check::start(update_checks_enabled(&mode));
 
     let result = (|| -> Result<()> {
@@ -57,6 +62,8 @@ fn run() -> Result<()> {
                 write_stdout(&[env!("CARGO_PKG_VERSION").as_bytes(), b"\n"])?;
                 Ok(())
             }
+            cli::Mode::Models => list_models(),
+            cli::Mode::Benchmark => benchmark::run(model.as_deref(), reasoning.as_deref()),
             cli::Mode::Upgrade => {
                 if let Some(message) = upgrade::run()? {
                     write_stdout(&[message.as_bytes(), b"\n"])?;
@@ -69,20 +76,23 @@ fn run() -> Result<()> {
             }
             cli::Mode::OneShot(question) => {
                 let config = config::Config::load()?;
-                let settings = Settings::resolve(&config, None);
+                let settings = Settings::resolve(&config, None)
+                    .with_overrides(model.as_deref(), reasoning.as_deref())?;
                 let question = Question::with_piped_context(question)?;
                 run_one_shot(&settings, config.instructions(), &question, None)
             }
             cli::Mode::Interactive => {
                 let config = config::Config::load()?;
-                let settings = Settings::resolve(&config, None);
+                let settings = Settings::resolve(&config, None)
+                    .with_overrides(model.as_deref(), reasoning.as_deref())?;
                 run_interactive(settings, None, config)
             }
             cli::Mode::Continue(words) => {
                 let config = config::Config::load()?;
                 let cwd = current_dir()?;
                 let session = state::latest(&cwd)?;
-                let settings = Settings::resolve(&config, Some(&session));
+                let settings = Settings::resolve(&config, Some(&session))
+                    .with_overrides(model.as_deref(), reasoning.as_deref())?;
                 if words.is_empty() {
                     run_interactive(settings, Some(session), config)
                 } else {
@@ -112,7 +122,12 @@ fn update_checks_enabled(mode: &cli::Mode) -> bool {
         && io::stderr().is_terminal()
         && !matches!(
             mode,
-            cli::Mode::Help | cli::Mode::Version | cli::Mode::Upgrade | cli::Mode::UpdateCheck
+            cli::Mode::Help
+                | cli::Mode::Version
+                | cli::Mode::Upgrade
+                | cli::Mode::UpdateCheck
+                | cli::Mode::Models
+                | cli::Mode::Benchmark
         )
 }
 
@@ -123,6 +138,22 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
+    fn with_overrides(mut self, model: Option<&str>, reasoning: Option<&str>) -> Result<Self> {
+        if let Some(id) = model {
+            let selected = cerebras::require_model(id)?;
+            self.model = Some(selected.id.to_owned());
+            // A one-off model choice gets that model's own defaults, rather
+            // than an incompatible effort inherited from another model.
+            self.reasoning = selected.default_reasoning.map(str::to_owned);
+        }
+        if let Some(level) = reasoning {
+            cerebras::require_model(self.model.as_deref().unwrap_or(cerebras::default_model()))?
+                .validate_reasoning(level)?;
+            self.reasoning = Some(level.to_owned());
+        }
+        Ok(self)
+    }
+
     fn resolve(config: &config::Config, session: Option<&state::Session>) -> Self {
         let saved = session.and_then(|session| session.settings.as_ref());
         Self {
@@ -137,6 +168,20 @@ impl Settings {
             response_color: config.response_color(),
         }
     }
+}
+
+fn list_models() -> Result<()> {
+    let mut output = String::from("MODEL\tPROVIDER\tAPI KEY\tDEFAULT REASONING\n");
+    for model in cerebras::MODELS {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            model.id,
+            model.provider.name(),
+            model.provider.env_key(),
+            model.default_reasoning.unwrap_or("none")
+        ));
+    }
+    write_stdout(&[output.as_bytes()])
 }
 
 /// The most piped input wut sends. Anything longer is cut with a note.
@@ -682,6 +727,29 @@ mod tests {
         InteractiveCommand, Question, byte_count, parse_interactive_command, selection_after_delete,
     };
     use crate::prompt::is_command;
+
+    #[test]
+    fn model_override_uses_its_own_effort_without_changing_saved_defaults() {
+        let mut config = crate::config::Config::default();
+        config.set_reasoning(Some("high".to_owned()));
+        let settings = super::Settings::resolve(&config, None)
+            .with_overrides(Some("groq:openai/gpt-oss-20b"), None)
+            .unwrap();
+        assert_eq!(settings.reasoning.as_deref(), Some("low"));
+        assert_eq!(settings.model.as_deref(), Some("groq:openai/gpt-oss-20b"));
+        assert_eq!(config.reasoning(), Some("high"));
+        assert_eq!(config.model(), Some("gpt-oss-120b"));
+        assert!(
+            super::Settings::resolve(&config, None)
+                .with_overrides(Some("typo"), None)
+                .is_err()
+        );
+        assert!(
+            super::Settings::resolve(&config, None)
+                .with_overrides(Some("groq:openai/gpt-oss-20b"), Some("none"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn only_known_commands_are_commands() {

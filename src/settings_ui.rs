@@ -233,7 +233,7 @@ fn select_model(settings: &mut impl EditableSettings) -> Result<()> {
         .and_then(|current| models.iter().position(|model| model.id == current))
         .unwrap_or(0);
     let Choice::Selected(index) =
-        select::choose("Model", "Cerebras public models", &items, selected)?
+        select::choose("Model", "Cerebras and Groq models", &items, selected)?
     else {
         return Ok(());
     };
