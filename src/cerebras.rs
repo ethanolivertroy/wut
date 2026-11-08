@@ -359,6 +359,9 @@ impl Client {
         let mut body = request_body(&messages, &[], model, effort);
         body["response_format"] = json!({"type": "json_object"});
         let outcome = self.send_stream(body, &mut |_| Ok(()))?;
+        if !outcome.tool_calls.is_empty() {
+            return Err(json_format_error());
+        }
         let envelope: Value =
             serde_json::from_str(&outcome.content).map_err(|_| json_format_error())?;
         let object = envelope
@@ -745,6 +748,35 @@ fn api_status_error(status: u16, body: &str) -> Error {
 mod tests {
     use super::{EventStream, api_status_error, collect_stream};
     use crate::error::Result;
+
+    #[test]
+    #[ignore = "calls Cerebras; requires a temporary CEREBRAS_API_KEY"]
+    fn live_json_formatter_preserves_objects_and_arrays() {
+        let model = "qwen-3.8-27b";
+        let client = super::Client::new(model)
+            .unwrap()
+            .with_timeout(std::time::Duration::from_secs(15));
+        for (question, draft, expected) in [
+            (
+                "Return only JSON with blocked: true.",
+                "The read was blocked.\n```json\n{\"blocked\":true}\n```",
+                serde_json::json!({"blocked":true}),
+            ),
+            (
+                "Return only a JSON array with the numbers 1, 2 and 3.",
+                "Here are the requested numbers: [1,2,3]",
+                serde_json::json!([1, 2, 3]),
+            ),
+        ] {
+            let result = client
+                .repair_json(question, draft, model, Some("none"))
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn groq_requests_use_the_provider_model_id_and_separate_reasoning() {
