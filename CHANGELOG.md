@@ -19,7 +19,7 @@
   symlinks and hard links. The installer asks before saving a key in plaintext;
   environment keys take priority and are not saved.
 - Block indirect reads through secret-path symlinks and bound workspace reads
-  to regular text files. Refuse web search after reading file contents in a turn.
+  to regular text files, including files that grow while being read.
 - Check all four shipping targets, archive contents, checksums, packaged CLI
   behavior and the crates.io source package before release. Linux and macOS
   binaries cover Intel and ARM; release and pull-request CI share build steps.

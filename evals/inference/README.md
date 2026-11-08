@@ -103,3 +103,15 @@ and no API credentials. Median wall times were 0.65 ms for `--version`, 0.64 ms
 for `--help`, and 0.78 ms for `--models`, including Python subprocess overhead.
 The tested release binary was 6,329,192 bytes. These local command timings
 exclude network requests and do not describe npm wrapper startup overhead.
+
+## Release candidate packaging
+
+The [0.0.5 candidate report](2026-11-08-release-candidate-zero.json) records all
+four CI-built archives, their checksums and architecture checks, plus native
+Linux musl installation checks. All ten CI jobs passed for the recorded source.
+The actual archive worked through the installer and npm wrapper, including npm
+cache reuse with the download server offline. An invalid installer checksum was
+rejected while preserving the installed binary. No credential file was saved.
+The installed musl binary also passed a synthetic workspace-read/strict-JSON
+request against both live Cerebras models. These checks cover candidate files;
+published releases receive their own checksums when the release workflow runs.
