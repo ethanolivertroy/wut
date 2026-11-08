@@ -45,9 +45,11 @@ jobs:
               run: |
                   crate_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
                   [[ "$crate_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-                  python3 -c 'import json, sys; assert json.load(open("npm/package.json"))["version"] == sys.argv[1], "npm and crate versions differ"' "$crate_version"
                   if [ -n "$EXPECTED_TAG" ]; then
                     test "$EXPECTED_TAG" = "v$crate_version"
+                  else
+                    # Historical tags set the npm version during publishing.
+                    python3 -c 'import json, sys; assert json.load(open("npm/package.json"))["version"] == sys.argv[1], "npm and crate versions differ"' "$crate_version"
                   fi
             - name: Install release Rust
               run: |
@@ -86,14 +88,16 @@ jobs:
                   version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
                   "$package/wut" -V | grep -Fx "$version"
                   "$package/wut" --version | grep -Fx "$version"
-                  "$package/wut" --models | grep -F "groq:openai/gpt-oss-20b"
                   archive="wut-$target.tar.gz"
                   tar -C "$package" -czf "dist/$archive" wut README.md LICENSE
                   (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
                   tar -tzf "dist/$archive" | sort > "$RUNNER_TEMP/archive-contents"
                   printf '%s\n' LICENSE README.md wut | diff - "$RUNNER_TEMP/archive-contents"
             - name: Test packaged CLI and credential installer
+              # Older release tags predate these CLI options and Python tests.
+              if: inputs.tag == ''
               run: |
+                  "$RUNNER_TEMP/package/wut" --models | grep -F "groq:openai/gpt-oss-20b"
                   WUT_TEST_BINARY="$RUNNER_TEMP/package/wut" python3 -m unittest discover -s tests -p 'test_*.py'
             - uses: actions/upload-artifact@v7
               with:
