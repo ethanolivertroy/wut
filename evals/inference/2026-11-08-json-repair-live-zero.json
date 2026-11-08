@@ -1,0 +1,8 @@
+{
+  "test": "live_json_formatter_preserves_objects_and_arrays",
+  "passed": true,
+  "cases": 2,
+  "wall_ms": 748.2297581154853,
+  "output": "\nrunning 1 test\ntest cerebras::tests::live_json_formatter_preserves_objects_and_arrays ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 115 filtered out; finished in 0.56s\n\n\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s\n     Running unittests src/main.rs (target/debug/deps/wut-a433042871f3c6b9)\n",
+  "source_commit": "cf4f9c067f476e8c817205f2863ca1a5698bd8d5"
+}

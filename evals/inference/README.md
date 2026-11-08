@@ -40,7 +40,7 @@ Qwen wrapped JSON in Markdown fences in the debugging and multi-file cases,
 despite the JSON-only requests. GPT-OSS was faster on some longer answers; the
 lower first-text latency did not predict the fastest completion on every task.
 
-Terminal rendering adds another distinction: the current renderer buffers a
+Terminal rendering adds another distinction: the baseline renderer buffered a
 line until a newline or completion. Single paragraphs appeared at 624–828 ms,
 near completion; multi-line answers began appearing at 288–312 ms. Those are
 observations from different generated answers, not an isolated estimate of
@@ -51,3 +51,33 @@ This is a small synthetic sample from one machine, not a global speed ranking
 or a production reliability estimate. Groq, TypeSafe triage, and web search were
 not exercised with live credentials. The short latency probes measure direct
 inference callbacks; they do not measure visible terminal text.
+
+## Incremental-rendering and JSON-format follow-up
+
+The [prompt-only attempt](2026-11-08-core-after-stream-json-zero.json) still
+produced one Qwen reply with prose and a JSON fence after a blocked file read.
+It is retained as a failed attempt, not replaced with a green-only sample.
+
+The validated-output implementation is recorded in the
+[core rerun](2026-11-08-core-validated-json-zero.json). Qwen passed 8/8 tasks,
+including all six strict raw-JSON cases. GPT-OSS passed JSON formatting, but
+reported source line 3 instead of line 4 in the debugging case despite giving
+the correct fix, so its overall result remains 7/8. Formatting validation does
+not turn an incorrect value into a correct answer.
+
+The [terminal rerun](2026-11-08-terminal-incremental-zero.json) shows ordinary
+paragraphs arriving incrementally: first visible text was 238 ms for GPT-OSS
+and 280 ms for Qwen, with 42 and 61 visible chunks rather than the baseline's
+single completed paragraph. The before/after prompts were the same, but model
+output and provider latency can vary; these are observations, not guaranteed
+speedups. All seven terminal/error/cancellation checks passed.
+
+A separate [live formatter probe](2026-11-08-json-repair-live-zero.json) calls
+the actual production repair method against Cerebras, verifying both object
+and array values. The repair request uses a JSON object envelope without tools;
+the extracted value is parsed before any output is displayed. It can be rerun
+with an environment key using:
+
+```sh
+cargo test --locked cerebras::tests::live_json_formatter_preserves_objects_and_arrays -- --exact --ignored
+```

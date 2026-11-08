@@ -113,6 +113,16 @@ wut --settings            # configure
 In a chat, Ctrl-C stops the current answer; Ctrl-D or Ctrl-C on an empty line
 exits.
 
+Ordinary paragraphs appear as they stream, without waiting for a newline.
+Code blocks and diagrams retain their complete-block rendering.
+
+Explicit JSON-only directives such as `Return only JSON` select validated raw
+output, including in a terminal. A complete JSON code fence can be removed
+without changing its value. If a draft mixes prose with JSON, wut makes at most
+one tool-free JSON-mode formatting request; if that fails validation, it reports
+an error without printing a malformed document. This checks JSON syntax, not the
+correctness of its values or adherence to a user-provided schema.
+
 ## Diagrams
 
 In terminals that show images through the Kitty graphics protocol (Rex,
