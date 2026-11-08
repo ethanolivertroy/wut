@@ -8,6 +8,9 @@ const { spawnSync } = require('node:child_process');
 
 const REPOSITORY = 'ethanolivertroy/wut';
 const VERSION = require('../package.json').version;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
+const MAX_CHECKSUM_BYTES = 4096;
 
 const INSTALL_HINT =
   `install the standalone binary instead:\n` +
@@ -64,12 +67,33 @@ function expectedChecksum(text, asset) {
   return hash;
 }
 
-async function fetchBytes(url) {
-  const response = await fetch(url, { redirect: 'follow' });
+async function fetchBytes(url, limit, signal) {
+  const response = await fetch(url, { redirect: 'follow', signal });
   if (!response.ok) {
     throw new Error(`could not download ${url} (HTTP ${response.status})`);
   }
-  return Buffer.from(await response.arrayBuffer());
+  const tooLarge = () => new Error(`download exceeds ${limit} bytes: ${url}`);
+  if (Number(response.headers.get('content-length')) > limit) {
+    throw tooLarge();
+  }
+  if (!response.body) {
+    throw new Error(`empty download response: ${url}`);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > limit - length) throw tooLarge();
+      chunks.push(Buffer.from(value));
+      length += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, length);
 }
 
 function requireTar() {
@@ -81,10 +105,32 @@ function requireTar() {
   }
 }
 
-async function downloadBinary({ version = VERSION, asset = assetFor() } = {}) {
+async function downloadBinary({
+  version = VERSION, asset = assetFor(),
+  timeoutMs = DOWNLOAD_TIMEOUT_MS, maxArchiveBytes = MAX_ARCHIVE_BYTES,
+} = {}) {
   const base = releaseBase(version);
-  const archive = await fetchBytes(`${base}/${asset}`);
-  const published = expectedChecksum(await fetchBytes(`${base}/${asset}.sha256`), asset);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  let archive, checksum;
+  try {
+    [archive, checksum] = await Promise.all([
+      fetchBytes(`${base}/${asset}`, maxArchiveBytes, controller.signal),
+      fetchBytes(`${base}/${asset}.sha256`, MAX_CHECKSUM_BYTES, controller.signal),
+    ]);
+  } catch (error) {
+    // Stop the companion request as well; no partial download enters the cache.
+    controller.abort();
+    if (timedOut) throw new Error(`download timed out after ${timeoutMs} ms`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+  const published = expectedChecksum(checksum, asset);
   const actual = sha256(archive);
 
   if (actual !== published) {

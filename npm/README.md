@@ -13,6 +13,10 @@ The wrapper downloads the prebuilt release binary for your platform
 with the release, and caches it in `~/.cache/wut-npm/<version>/`. Every later
 run starts the cached binary directly.
 
+Archive and checksum downloads run in parallel with a shared 60-second deadline.
+The archive response is limited to 32 MiB and the checksum to 4 KiB, including
+chunked responses. Failed downloads leave an existing cached binary intact.
+
 Requires Node 18 or newer. Set `CEREBRAS_API_KEY` or `GROQ_API_KEY` in the process
 environment, then select a model:
 

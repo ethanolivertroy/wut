@@ -19,6 +19,7 @@ let server;
 let origin;
 let served;
 let workspace;
+let respond;
 
 function tarUp(contents, destination) {
   const source = fs.mkdtempSync(path.join(workspace, 'src-'));
@@ -36,6 +37,7 @@ before(async () => {
   served = fs.mkdtempSync(path.join(workspace, 'served-'));
 
   server = http.createServer((request, response) => {
+    if (respond) return respond(request, response);
     const name = path.basename(request.url.split('?')[0]);
     const file = path.join(served, name);
     if (!fs.existsSync(file)) {
@@ -52,11 +54,13 @@ before(async () => {
 });
 
 after(() => {
+  server.closeAllConnections();
   server.close();
   fs.rmSync(workspace, { recursive: true, force: true });
 });
 
 beforeEach(() => {
+  respond = null;
   for (const name of fs.readdirSync(served)) {
     fs.rmSync(path.join(served, name), { force: true });
   }
@@ -138,4 +142,91 @@ test('refuses a tampered archive and installs nothing', async () => {
     false,
     'a rejected download must not leave a binary behind',
   );
+});
+
+test('starts archive and checksum requests before either response completes', async () => {
+  publishRelease();
+  const pending = [];
+  respond = (request, response) => {
+    pending.push([request, response]);
+    if (pending.length === 2) {
+      for (const [req, res] of pending) {
+        res.end(fs.readFileSync(path.join(served, path.basename(req.url))));
+      }
+    }
+  };
+  await release.downloadBinary({ timeoutMs: 2000 });
+  assert.equal(pending.length, 2);
+});
+
+test('bounds downloads stalled before headers and during a response body', async () => {
+  for (const startedBody of [false, true]) {
+    let bodyStarted = false;
+    respond = (_request, response) => {
+      if (startedBody) {
+        bodyStarted = true;
+        response.writeHead(200);
+        response.write('partial body');
+      }
+    };
+    await assert.rejects(release.downloadBinary({ timeoutMs: 200 }), /download timed out/);
+    if (startedBody) assert.equal(bodyStarted, true, 'response body never started');
+    assert.equal(fs.existsSync(release.binaryPath()), false);
+  }
+});
+
+test('rejects advertised oversized archives and cancels the pending checksum', async () => {
+  const pending = [];
+  let peerClosed;
+  const closed = new Promise(resolve => { peerClosed = resolve; });
+  respond = (request, response) => {
+    pending.push([request, response]);
+    if (pending.length === 2) {
+      for (const [req, res] of pending) {
+        if (req.url.endsWith('.sha256')) {
+          res.on('close', peerClosed);
+          res.write('unfinished checksum');
+        } else {
+          res.writeHead(200, { 'content-length': '2048' });
+          res.flushHeaders();
+        }
+      }
+    }
+  };
+  await assert.rejects(release.downloadBinary({ maxArchiveBytes: 1024 }), /exceeds 1024 bytes/);
+  const timer = setTimeout(() => peerClosed('timeout'), 2000);
+  try {
+    assert.notEqual(await closed, 'timeout', 'companion download was not cancelled');
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal(fs.existsSync(release.binaryPath()), false);
+});
+
+test('bounds chunked archive and checksum bodies without content-length', async () => {
+  for (const oversizedChecksum of [false, true]) {
+    publishRelease();
+    respond = (request, response) => {
+      if (request.url.endsWith('.sha256') === oversizedChecksum) {
+        response.write(Buffer.alloc(3000));
+        response.end(Buffer.alloc(3000));
+      } else {
+        response.end(fs.readFileSync(path.join(served, path.basename(request.url))));
+      }
+    };
+    const limit = oversizedChecksum ? 4096 : 1024;
+    await assert.rejects(release.downloadBinary({ maxArchiveBytes: 1024 }),
+      new RegExp(`exceeds ${limit} bytes`));
+    assert.equal(fs.existsSync(release.binaryPath()), false);
+  }
+});
+
+test('a failed download preserves an existing cached binary', async () => {
+  publishRelease();
+  const binary = await release.ensureBinary();
+  const before = fs.readFileSync(binary);
+  respond = (_request, response) => response.writeHead(503).end('unavailable');
+  await assert.rejects(release.downloadBinary(), /HTTP 503/);
+  assert.deepEqual(fs.readFileSync(binary), before);
+  assert.deepEqual(fs.readdirSync(process.env.WUT_NPM_CACHE_DIR), [VERSION_TEXT]);
 });
