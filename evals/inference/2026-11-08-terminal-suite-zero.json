@@ -1,0 +1,100 @@
+{
+  "status": "finished",
+  "phase": "terminal",
+  "host": "zero",
+  "all_passed": true,
+  "binary": "/root/.local/bin/wut",
+  "profiles": [
+    {
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "latency_samples": 0,
+      "tasks_passed": 5,
+      "tasks_total": 5,
+      "tasks_content_correct": 5,
+      "format_failures": []
+    },
+    {
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "latency_samples": 0,
+      "tasks_passed": 2,
+      "tasks_total": 2,
+      "tasks_content_correct": 2,
+      "format_failures": []
+    }
+  ],
+  "records": [
+    {
+      "case": "terminal_one_paragraph",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true,
+      "first_visible_ms": 828.2211220357567,
+      "wall_ms": 851.2005310039967,
+      "visible_chunks": 1,
+      "output_chars": 1852,
+      "nonempty_lines": 1,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_multiple_lines",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true,
+      "first_visible_ms": 312.30656802654266,
+      "wall_ms": 417.62435087002814,
+      "visible_chunks": 8,
+      "output_chars": 804,
+      "nonempty_lines": 8,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_one_paragraph",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true,
+      "first_visible_ms": 624.42802102305,
+      "wall_ms": 663.1259741261601,
+      "visible_chunks": 1,
+      "output_chars": 1901,
+      "nonempty_lines": 1,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_multiple_lines",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true,
+      "first_visible_ms": 288.0469639785588,
+      "wall_ms": 483.83239982649684,
+      "visible_chunks": 8,
+      "output_chars": 1123,
+      "nonempty_lines": 8,
+      "stderr": ""
+    },
+    {
+      "case": "invalid_key",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "wall_ms": 150.2379789017141,
+      "stderr": "wut: the inference endpoint returned HTTP 401: Wrong API Key\r\n     check your API key and try again\r\n"
+    },
+    {
+      "case": "valid_key_after_rejection",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "wall_ms": 490.89772114530206,
+      "stderr": ""
+    },
+    {
+      "case": "one_shot_sigint",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "exit_code": -2,
+      "wall_ms": 52.50177113339305
+    }
+  ],
+  "scoring": "JSON tasks require raw JSON without Markdown fences. Content correctness and format correctness are recorded separately.",
+  "scope": "Visible terminal output, invalid-key recovery, and one-shot SIGINT checks. No TypeSafe or web search. Not a global ranking or production reliability estimate."
+}
