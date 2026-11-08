@@ -1,0 +1,174 @@
+{
+  "source_commit": "c55adb6b25a6c04e32382c4f638336bc84c65f03",
+  "ci_run": "https://github.com/ethanolivertroy/wut/actions/runs/42511833556",
+  "version": "0.0.5",
+  "archives": [
+    {
+      "target": "x86_64-unknown-linux-musl",
+      "sha256": "124367afb5b4bf36a4ccd92f12c1daf8bc25383108d280cdd9900ba84e0811ca",
+      "binary_bytes": 6689872,
+      "archive_members": [
+        "wut",
+        "README.md",
+        "LICENSE"
+      ],
+      "architecture_matches": true
+    },
+    {
+      "target": "aarch64-unknown-linux-musl",
+      "sha256": "4ed841f075c9985406a2a3e90571915a00702458b39cf8ae68839f67cfc1ab2d",
+      "binary_bytes": 5575112,
+      "archive_members": [
+        "wut",
+        "README.md",
+        "LICENSE"
+      ],
+      "architecture_matches": true
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "sha256": "8fbed0863e7dd7cdecb91a22ec5fa61617cdaca6059d87fc9d44282b660d2f58",
+      "binary_bytes": 5576952,
+      "archive_members": [
+        "wut",
+        "README.md",
+        "LICENSE"
+      ],
+      "architecture_matches": true
+    },
+    {
+      "target": "aarch64-apple-darwin",
+      "sha256": "03f195a358cd559f70f99754784ed049e5349954fa81c925838a8812d909d650",
+      "binary_bytes": 4717664,
+      "archive_members": [
+        "wut",
+        "README.md",
+        "LICENSE"
+      ],
+      "architecture_matches": true
+    }
+  ],
+  "native": {
+    "version": "0.0.5",
+    "missing_key_fails_locally": true,
+    "musl_has_no_interpreter": true
+  },
+  "npm": {
+    "downloaded_real_archive": true,
+    "cached_bytes_match": true,
+    "works_with_download_server_offline": true
+  },
+  "installer": {
+    "installed_actual_archive": true,
+    "did_not_save_credentials": true,
+    "bad_checksum_rejected": true,
+    "existing_install_preserved_on_failure": true
+  },
+  "passed": true,
+  "live_shipping_binary": {
+    "source_commit": "c55adb6b25a6c04e32382c4f638336bc84c65f03",
+    "binary": "/root/.local/bin/wut",
+    "target": "x86_64-unknown-linux-musl",
+    "case": "shipping_binary_tls_workspace_and_raw_json",
+    "passed": true,
+    "records": [
+      {
+        "model": "gpt-oss-120b",
+        "reasoning": "low",
+        "passed": true,
+        "wall_ms": 472.26688195951283,
+        "exit_code": 0,
+        "answer": "{\"release_marker\":\"6a0e0c32cd406bb3\"}\n",
+        "stderr": ""
+      },
+      {
+        "model": "qwen-3.8-27b",
+        "reasoning": "none",
+        "passed": true,
+        "wall_ms": 645.7244448829442,
+        "exit_code": 0,
+        "answer": "{\"release_marker\":\"6a0e0c32cd406bb3\"}\n",
+        "stderr": ""
+      }
+    ]
+  },
+  "version_guard": {
+    "source_commit": "c55adb6b25a6c04e32382c4f638336bc84c65f03",
+    "cases": [
+      {
+        "case": "historical_tag",
+        "expected_accept": true,
+        "accepted": true,
+        "passed": true
+      },
+      {
+        "case": "new_tag",
+        "expected_accept": true,
+        "accepted": true,
+        "passed": true
+      },
+      {
+        "case": "candidate",
+        "expected_accept": true,
+        "accepted": true,
+        "passed": true
+      },
+      {
+        "case": "candidate_drift",
+        "expected_accept": false,
+        "accepted": false,
+        "passed": true
+      },
+      {
+        "case": "wrong_tag",
+        "expected_accept": false,
+        "accepted": false,
+        "passed": true
+      }
+    ],
+    "passed": true
+  },
+  "ci_checks": [
+    {
+      "name": "Homebrew formula",
+      "conclusion": "success"
+    },
+    {
+      "name": "Check (ubuntu-24.04)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Rust 1.88 minimum",
+      "conclusion": "success"
+    },
+    {
+      "name": "npm wrapper (macos-15)",
+      "conclusion": "success"
+    },
+    {
+      "name": "npm wrapper (ubuntu-24.04)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Check (macos-15)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Release artifacts / Build x86_64-unknown-linux-musl",
+      "conclusion": "success"
+    },
+    {
+      "name": "Release artifacts / Build aarch64-apple-darwin",
+      "conclusion": "success"
+    },
+    {
+      "name": "Release artifacts / Build aarch64-unknown-linux-musl",
+      "conclusion": "success"
+    },
+    {
+      "name": "Release artifacts / Build x86_64-apple-darwin",
+      "conclusion": "success"
+    }
+  ],
+  "scope": "Pre-publication candidate archives from CI. Hashes identify these test artifacts, not future published assets. Synthetic live Cerebras checks; no live Groq key. No credentials saved by these checks."
+}

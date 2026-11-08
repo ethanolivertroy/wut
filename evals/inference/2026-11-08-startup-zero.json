@@ -1,0 +1,29 @@
+{
+  "case": "standalone_startup",
+  "source_commit": "a4369d40f9b40134577195f6401b5698be4eda32",
+  "binary_bytes": 6329192,
+  "scope": "30 warm process launches after 5 warmups per command; no API credentials or network; includes Python subprocess overhead",
+  "results": [
+    {
+      "argument": "--version",
+      "samples": 30,
+      "median_ms": 0.6532880000000001,
+      "p95_ms": 0.70439,
+      "max_ms": 0.71651
+    },
+    {
+      "argument": "--help",
+      "samples": 30,
+      "median_ms": 0.6390965,
+      "p95_ms": 0.680175,
+      "max_ms": 0.691346
+    },
+    {
+      "argument": "--models",
+      "samples": 30,
+      "median_ms": 0.7805625,
+      "p95_ms": 0.934323,
+      "max_ms": 0.986273
+    }
+  ]
+}

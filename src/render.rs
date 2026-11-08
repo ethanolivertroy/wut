@@ -13,6 +13,9 @@ const DARK_GRAY: &str = "\x1b[90m";
 pub struct TerminalRenderer<W = io::Stdout> {
     output: W,
     pending: String,
+    /// The current paragraph already has text on screen; pending holds only
+    /// the suffix whose inline Markdown could still change with more input.
+    plain_streaming: bool,
     code: Option<CodeBlock>,
     wrote: bool,
     ends_with_newline: bool,
@@ -49,6 +52,7 @@ impl<W: Write> TerminalRenderer<W> {
         Self {
             output,
             pending: String::new(),
+            plain_streaming: false,
             code: None,
             wrote: false,
             ends_with_newline: false,
@@ -67,9 +71,9 @@ impl<W: Write> TerminalRenderer<W> {
     /// rather than the answer. Blank lines are dropped. Output taller than the
     /// screen is left as it is, since the cursor can't reach it.
     pub fn dim_round(&mut self) -> Result<()> {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.plain_streaming {
             let line = std::mem::take(&mut self.pending);
-            self.line(&line)?;
+            self.complete_line(&line)?;
         }
         if let Some(block) = self.code.take() {
             self.draw_code(block)?;
@@ -97,21 +101,57 @@ impl<W: Write> TerminalRenderer<W> {
     }
 
     pub fn push(&mut self, text: &str) -> Result<()> {
-        self.pending.push_str(text);
-
-        while let Some(newline) = self.pending.find('\n') {
-            let line = self.pending[..newline].to_owned();
-            self.pending.drain(..=newline);
-            self.line(&line)?;
+        for fragment in text.split_inclusive('\n') {
+            let (content, complete) = match fragment.strip_suffix('\n') {
+                Some(content) => (content, true),
+                None => (fragment, false),
+            };
+            // Sanitize before classifying Markdown, including markers split
+            // by control characters or spread over different stream chunks.
+            self.pending.push_str(&printable(content));
+            if complete {
+                let line = std::mem::take(&mut self.pending);
+                self.complete_line(&line)?;
+            } else {
+                self.stream_paragraph()?;
+            }
         }
-
         Ok(())
     }
 
+    fn stream_paragraph(&mut self) -> Result<()> {
+        if self.code.is_some() || (!self.plain_streaming && !plain_line_ready(&self.pending)) {
+            return Ok(());
+        }
+        let ready = inline_ready_prefix(&self.pending);
+        if ready == 0 {
+            return Ok(());
+        }
+        let color = self.response_color.ansi();
+        let reset = if color.is_empty() { "" } else { RESET };
+        let rendered = render_inline(&self.pending[..ready], color);
+        // Restore terminal attributes after every visible chunk, including
+        // while waiting on the network or being interrupted with Ctrl-C.
+        self.write(&format!("{color}{rendered}{reset}"))?;
+        self.pending.drain(..ready);
+        self.plain_streaming = true;
+        self.list_active = false;
+        self.list_has_children = false;
+        Ok(())
+    }
+
+    fn complete_line(&mut self, line: &str) -> Result<()> {
+        if !std::mem::take(&mut self.plain_streaming) {
+            return self.line(line);
+        }
+        let color = self.response_color.ansi();
+        self.write(&self.response_line(&render_inline(line, color)))
+    }
+
     pub fn finish(mut self) -> Result<()> {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.plain_streaming {
             let line = std::mem::take(&mut self.pending);
-            self.line(&line)?;
+            self.complete_line(&line)?;
         }
 
         if let Some(block) = self.code.take() {
@@ -329,6 +369,53 @@ impl<W: Write> TerminalRenderer<W> {
     }
 }
 
+/// Wait only while a line could become a block marker. Ordinary paragraph
+/// text can then be appended without repainting or moving the terminal cursor.
+fn plain_line_ready(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if ["```", "# ", "## ", "### ", "> ", "- ", "* "]
+        .iter()
+        .any(|marker| marker.starts_with(trimmed) || trimmed.starts_with(marker))
+        || trimmed.trim_end().bytes().all(|byte| byte == b'-')
+        || trimmed.trim_end().bytes().all(|byte| byte == b'*')
+    {
+        return false;
+    }
+    let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if rest.is_empty() || rest == "." || rest.starts_with(". ") {
+            return false;
+        }
+    }
+    true
+}
+
+/// A trailing star or unfinished inline span may acquire its closing marker
+/// in the next chunk. Everything before it has a stable rendering already.
+fn inline_ready_prefix(line: &str) -> usize {
+    let mut consumed = 0;
+    let mut rest = line;
+    loop {
+        let code = rest.find('`').map(|index| (index, "`"));
+        let bold = rest.find("**").map(|index| (index, "**"));
+        let Some((open, marker)) = [code, bold].into_iter().flatten().min_by_key(|item| item.0)
+        else {
+            return consumed + rest.len() - usize::from(rest.ends_with('*'));
+        };
+        let after = &rest[open + marker.len()..];
+        let Some(close) = after.find(marker) else {
+            return consumed + open;
+        };
+        let end = open + marker.len() + close + marker.len();
+        consumed += end;
+        rest = &rest[end..];
+    }
+}
+
 fn terminal_size() -> Option<(usize, usize)> {
     let (columns, rows) = crossterm::terminal::size().ok()?;
     (columns > 0 && rows > 0).then_some((usize::from(columns), usize::from(rows)))
@@ -468,6 +555,32 @@ mod tests {
         plain
     }
 
+    /// Compare rendered character styles, ignoring redundant SGR resets
+    /// between chunks that safely restore the user's terminal attributes.
+    fn styled_characters(text: &str) -> Vec<(char, Vec<String>)> {
+        let mut result = Vec::new();
+        let mut style = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(after) = rest.strip_prefix("\x1b[") {
+                let end = after.find('m').unwrap();
+                let sgr = &after[..end];
+                if sgr == "0" {
+                    style.clear();
+                } else if !style.iter().any(|value| value == sgr) {
+                    style.push(sgr.to_owned());
+                    style.sort();
+                }
+                rest = &after[end + 1..];
+            } else {
+                let ch = rest.chars().next().unwrap();
+                result.push((ch, style.clone()));
+                rest = &rest[ch.len_utf8()..];
+            }
+        }
+        result
+    }
+
     #[test]
     fn streamed_chunks_render_like_the_whole_answer() {
         let answer = "# Title\nSome **bold** and `code`.\n- one\n  - nested\n1. first\n";
@@ -479,6 +592,92 @@ mod tests {
             plain(&whole),
             "Title\nSome bold and code.\n  • one\n    - nested\n  1. first\n"
         );
+    }
+
+    #[test]
+    fn paragraphs_are_written_before_a_newline_or_completion() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::with_writer(&mut output, ResponseColor::Default);
+        renderer.push("Hello").unwrap();
+        assert_eq!(renderer.output.as_slice(), b"Hello");
+        assert!(renderer.pending.is_empty());
+        renderer.push(" world").unwrap();
+        assert_eq!(renderer.output.as_slice(), b"Hello world");
+        renderer.finish().unwrap();
+        assert_eq!(output, b"Hello world\n");
+    }
+
+    #[test]
+    fn incomplete_inline_markup_does_not_hold_back_preceding_text() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::with_writer(&mut output, ResponseColor::Default);
+        renderer.push("This is **par").unwrap();
+        assert_eq!(renderer.output.as_slice(), b"This is ");
+        renderer.push("tial** text and `co").unwrap();
+        assert_eq!(
+            plain(&String::from_utf8_lossy(renderer.output)),
+            "This is partial text and "
+        );
+        renderer.push("de`.").unwrap();
+        assert_eq!(
+            plain(&String::from_utf8_lossy(renderer.output)),
+            "This is partial text and code."
+        );
+        renderer.finish().unwrap();
+        assert_eq!(
+            plain(&String::from_utf8(output).unwrap()),
+            "This is partial text and code.\n"
+        );
+    }
+
+    #[test]
+    fn streaming_keeps_markdown_colors_and_control_sanitization_unchanged() {
+        for answer in [
+            "**bold** at the start, `code` and a trailing *\n",
+            "`code` at the start and **half open\n",
+            "123ordinary text\n--ordinary text\n---\n> quote\n",
+            "# Heading\n- item\n  - child\n1. first\n",
+            "界e\u{301} before **bo\x07ld** and `co\x1bde`.\n",
+            "a *\x07*bold** span and \tindent\n",
+            "```rust\nlet x = 1;\n```\nplain text",
+        ] {
+            let pieces: Vec<String> = answer.chars().map(String::from).collect();
+            let pieces: Vec<&str> = pieces.iter().map(String::as_str).collect();
+            for color in [ResponseColor::Default, ResponseColor::Red] {
+                assert_eq!(
+                    styled_characters(&render(&pieces, color)),
+                    styled_characters(&render(&[answer], color)),
+                    "{answer:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_paragraphs_do_not_accumulate_until_their_line_ends() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::with_writer(&mut output, ResponseColor::Red);
+        for _ in 0..1_000 {
+            renderer.push("more text ").unwrap();
+            assert!(renderer.pending.is_empty());
+        }
+        assert_eq!(
+            plain(&String::from_utf8_lossy(renderer.output)).len(),
+            10_000
+        );
+        renderer.finish().unwrap();
+        assert_eq!(plain(&String::from_utf8(output).unwrap()).len(), 10_001);
+    }
+
+    #[test]
+    fn partial_colored_output_leaves_terminal_attributes_reset() {
+        let mut output = Vec::new();
+        let mut renderer = TerminalRenderer::with_writer(&mut output, ResponseColor::Red);
+        renderer.push("partial").unwrap();
+        assert!(renderer.output.ends_with(b"\x1b[0m"));
+        renderer.push(" answer").unwrap();
+        assert!(renderer.output.ends_with(b"\x1b[0m"));
+        renderer.finish().unwrap();
     }
 
     #[test]

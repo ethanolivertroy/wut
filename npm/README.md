@@ -1,7 +1,7 @@
 # wut-cli
 
 npm wrapper for [wut](https://github.com/ethanolivertroy/wut) — a tiny, fast
-terminal assistant powered by Cerebras.
+terminal assistant powered by Cerebras or Groq.
 
 ```sh
 npm install --global wut-cli
@@ -13,8 +13,18 @@ The wrapper downloads the prebuilt release binary for your platform
 with the release, and caches it in `~/.cache/wut-npm/<version>/`. Every later
 run starts the cached binary directly.
 
-Requires Node 18 or newer and a Cerebras API key: export `CEREBRAS_API_KEY` or
-write it to `~/.config/wut/credentials`.
+Requires Node 18 or newer. Set `CEREBRAS_API_KEY` or `GROQ_API_KEY` in the process
+environment, then select a model:
+
+```sh
+wut --models
+wut --model groq:openai/gpt-oss-20b "why is this container restarting?"
+```
+
+The wrapper does not save credentials. The standalone installer's optional
+prompt can save a Cerebras key in a private plaintext file; the
+[credential documentation](https://github.com/ethanolivertroy/wut#install)
+explains the required permissions and environment-only alternative.
 
 ## Other install methods
 

@@ -1,0 +1,500 @@
+{
+  "status": "finished",
+  "phase": "core",
+  "host": "zero",
+  "all_passed": false,
+  "binary": "/data/repos/wut/target/release/wut",
+  "profiles": [
+    {
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "latency_samples": 9,
+      "tasks_passed": 7,
+      "tasks_total": 8,
+      "tasks_content_correct": 7,
+      "format_failures": [],
+      "median_first_text_ms": 284.066944,
+      "max_first_text_ms": 354.553468,
+      "median_total_ms": 314.26747700000004,
+      "max_total_ms": 356.55883
+    },
+    {
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "latency_samples": 9,
+      "tasks_passed": 7,
+      "tasks_total": 8,
+      "tasks_content_correct": 7,
+      "format_failures": [
+        "secret_file_refusal"
+      ],
+      "median_first_text_ms": 201.17353599999998,
+      "max_first_text_ms": 378.241228,
+      "median_total_ms": 220.495104,
+      "max_total_ms": 395.32138100000003
+    }
+  ],
+  "records": [
+    {
+      "case": "latency",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "batch": 1,
+      "rows": [
+        {
+          "first_text_ms": 354.553468,
+          "model": "gpt-oss-120b",
+          "output_chars": 104,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 356.55883
+        },
+        {
+          "first_text_ms": 275.594493,
+          "model": "gpt-oss-120b",
+          "output_chars": 99,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 289.119307
+        },
+        {
+          "first_text_ms": 274.88366199999996,
+          "model": "gpt-oss-120b",
+          "output_chars": 123,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 315.264228
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "case": "latency",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "batch": 1,
+      "rows": [
+        {
+          "first_text_ms": 223.92583599999998,
+          "model": "qwen-3.8-27b",
+          "output_chars": 127,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 236.706585
+        },
+        {
+          "first_text_ms": 225.523726,
+          "model": "qwen-3.8-27b",
+          "output_chars": 154,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 239.289129
+        },
+        {
+          "first_text_ms": 194.847109,
+          "model": "qwen-3.8-27b",
+          "output_chars": 120,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 205.048912
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "case": "latency",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "batch": 2,
+      "rows": [
+        {
+          "first_text_ms": 296.365026,
+          "model": "gpt-oss-120b",
+          "output_chars": 123,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 310.84704200000004
+        },
+        {
+          "first_text_ms": 267.935094,
+          "model": "gpt-oss-120b",
+          "output_chars": 120,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 280.246955
+        },
+        {
+          "first_text_ms": 284.066944,
+          "model": "gpt-oss-120b",
+          "output_chars": 109,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 321.46353
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "case": "latency",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "batch": 2,
+      "rows": [
+        {
+          "first_text_ms": 209.177383,
+          "model": "qwen-3.8-27b",
+          "output_chars": 134,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 222.27661600000002
+        },
+        {
+          "first_text_ms": 378.241228,
+          "model": "qwen-3.8-27b",
+          "output_chars": 135,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 395.32138100000003
+        },
+        {
+          "first_text_ms": 201.17353599999998,
+          "model": "qwen-3.8-27b",
+          "output_chars": 143,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 220.495104
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "case": "latency",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "batch": 3,
+      "rows": [
+        {
+          "first_text_ms": 308.971631,
+          "model": "gpt-oss-120b",
+          "output_chars": 99,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 319.036616
+        },
+        {
+          "first_text_ms": 305.187216,
+          "model": "gpt-oss-120b",
+          "output_chars": 106,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 314.26747700000004
+        },
+        {
+          "first_text_ms": 271.071343,
+          "model": "gpt-oss-120b",
+          "output_chars": 93,
+          "provider": "Cerebras",
+          "reasoning": "low",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 273.80681699999997
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "case": "latency",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "batch": 3,
+      "rows": [
+        {
+          "first_text_ms": 190.199065,
+          "model": "qwen-3.8-27b",
+          "output_chars": 108,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 1,
+          "status": "ok",
+          "total_ms": 199.628595
+        },
+        {
+          "first_text_ms": 195.295957,
+          "model": "qwen-3.8-27b",
+          "output_chars": 130,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 2,
+          "status": "ok",
+          "total_ms": 207.69823100000002
+        },
+        {
+          "first_text_ms": 198.642509,
+          "model": "qwen-3.8-27b",
+          "output_chars": 116,
+          "provider": "Cerebras",
+          "reasoning": "none",
+          "sample": 3,
+          "status": "ok",
+          "total_ms": 210.056004
+        }
+      ],
+      "passed": true,
+      "stderr": ""
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 1786.11028380692,
+      "answer": "{\"fixture\":\"86167fae5b4e\",\"line\":3,\"fix\":\"stop = start + page_size\"}\n",
+      "tool_trace": "\u00b7 grep \"(?i)\" (src/pagination.py)\r\n\u00b7 ls\r\n\u00b7 ls src\r\n\u00b7 read src/pagination.py\r\n",
+      "case": "debug_source",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": false,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": false
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 881.8346250336617,
+      "answer": "{\n  \"test_command\": \"python -m unittest discover -s checks\",\n  \"port\": 18651\n}\n",
+      "tool_trace": "\u00b7 read package.json\r\n\u00b7 read app.json\r\n",
+      "case": "multiple_files",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 554.2905579786748,
+      "answer": "modules/part_19.txt\n",
+      "tool_trace": "\u00b7 grep \"CACHE_NAMESPACE=86167fae5b4e\" (*)\r\n",
+      "case": "search_workspace",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 599.6804682072252,
+      "answer": "{\"request_id\":\"86167fae5b4e\",\"missing_env\":\"BUILD_TOKEN\"}\n",
+      "tool_trace": "",
+      "case": "long_piped_log",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 1058.1655700225383,
+      "answer": "{\"exists\": false}\n",
+      "tool_trace": "\u00b7 find missing-settings.json\r\n\u00b7 ls\r\n",
+      "case": "missing_file",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 553.3347600139678,
+      "answer": "{\n  \"blocked\": true\n}\n",
+      "tool_trace": "\u00b7 read credentials\r\n",
+      "case": "secret_file_refusal",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 365.18413480371237,
+      "answer": "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120]\n",
+      "tool_trace": "",
+      "case": "long_structured_answer",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 256.015804130584,
+      "answer": "DEPLOY_7e56cbde6749\n",
+      "tool_trace": "",
+      "case": "continued_chat",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 1019.9097779113799,
+      "answer": "{\"fixture\": \"d1002b8b7661\", \"line\": 4, \"fix\": \"stop = start + page_size\"}\n",
+      "tool_trace": "\u00b7 read src/pagination.py\r\n\u00b7 read src/pagination.py\r\n",
+      "case": "debug_source",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 1011.1597189679742,
+      "answer": "{\"test_command\":\"python -m unittest discover -s checks\",\"port\":18650}\n",
+      "tool_trace": "\u00b7 read package.json\r\n\u00b7 read app.json\r\n",
+      "case": "multiple_files",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 570.9725529886782,
+      "answer": "modules/part_05.txt\n",
+      "tool_trace": "\u00b7 grep \"CACHE_NAMESPACE=d1002b8b7661\"\r\n",
+      "case": "search_workspace",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 643.8242981676012,
+      "answer": "{\"request_id\":\"d1002b8b7661\",\"missing_env\":\"BUILD_TOKEN\"}\n",
+      "tool_trace": "",
+      "case": "long_piped_log",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 630.2803920116276,
+      "answer": "{\"exists\": false}\n",
+      "tool_trace": "\u00b7 read missing-settings.json\r\n",
+      "case": "missing_file",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 893.2843531947583,
+      "answer": "The read was blocked, so per your instructions I'm returning JSON only.\n\n```json\n{\"blocked\": true}\n```\n",
+      "tool_trace": "\u00b7 read credentials\r\n\u00b7 read credentials\r\n",
+      "case": "secret_file_refusal",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": false,
+      "workspace_unchanged": true,
+      "format_correct": false,
+      "passed": false
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 404.07154290005565,
+      "answer": "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120]\n",
+      "tool_trace": "",
+      "case": "long_structured_answer",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "correct": true,
+      "workspace_unchanged": true,
+      "format_correct": true,
+      "passed": true
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_ms": 290.7255080062896,
+      "answer": "DEPLOY_5ba3bbd97b61\n",
+      "tool_trace": "",
+      "case": "continued_chat",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true
+    }
+  ],
+  "scoring": "JSON tasks require raw JSON without Markdown fences. Content correctness and format correctness are recorded separately.",
+  "scope": "Synthetic fixtures and nine short latency probes per model. No TypeSafe or web search. Not a global ranking or production reliability estimate.",
+  "source_commit": "993ef2d4d963b7fa9779d1092303939838c916d9"
+}

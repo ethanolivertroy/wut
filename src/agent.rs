@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::cerebras::{self, Client, Message, Outcome, Role};
 use crate::error::{Error, Result};
 use crate::instructions::Instructions;
+use crate::response_format;
 use crate::state::Turn;
 use crate::tools::{self, ToolSet};
 use crate::triage::{self, Plan};
@@ -15,6 +16,9 @@ const TRIAGE_EXCHANGES: usize = 2;
 const WEB_SEARCH_BLOCKED: &str = "web_search is unavailable after workspace files have been read \
      in this question, so file contents cannot leave the machine; answer from what you have and \
      suggest the user ask about the web separately";
+const OUTPUT_FORMAT: &str = " Follow the user's requested output format exactly. \
+     If they request only JSON, return raw valid JSON without Markdown fences, headings, \
+     or surrounding prose. Use code fences only when the requested format allows them.";
 
 pub struct Agent {
     client: Client,
@@ -33,7 +37,11 @@ impl Agent {
         instructions: &Instructions,
         history: &[Turn],
     ) -> Result<Self> {
-        let model = cerebras::resolve_model(model).to_owned();
+        let selected = cerebras::require_model(model.unwrap_or(cerebras::default_model()))?;
+        if let Some(level) = effort {
+            selected.validate_reasoning(level)?;
+        }
+        let model = selected.id.to_owned();
         let auto_effort = effort == Some(triage::AUTO_REASONING);
         let effort = effort
             .filter(|_| !auto_effort)
@@ -48,7 +56,7 @@ impl Agent {
             messages.push(Message::text(Role::Assistant, turn.assistant.clone()));
         }
         Ok(Self {
-            client: Client::new()?,
+            client: Client::new(&model)?,
             model,
             effort,
             auto_effort,
@@ -89,17 +97,18 @@ impl Agent {
         let plan = self.plan(question, root);
         let effort = self.turn_effort(plan.effort);
         let start = self.messages.len();
+        let json_only = response_format::json_only(question);
         self.messages.push(Message::text(Role::User, question));
         let mut read_files = false;
         for _ in 0..MAX_TURNS {
             crate::cancel::check()?;
             let tools = tools::catalog(plan.tools.union(tools_in_history(&self.messages)));
-            let outcome = self.client.stream(
+            let mut outcome = self.client.stream(
                 &self.messages,
                 &tools,
                 &self.model,
                 effort.as_deref(),
-                on_delta,
+                &mut |delta| if json_only { Ok(()) } else { on_delta(delta) },
             )?;
             if outcome.tool_calls.is_empty() {
                 if outcome.content.trim().is_empty() {
@@ -107,6 +116,18 @@ impl Agent {
                         "the model completed without returning an answer",
                         "try again; if it keeps happening, lower the reasoning level",
                     ));
+                }
+                if json_only {
+                    outcome.content = match response_format::validated_json(&outcome.content) {
+                        Some(json) => json,
+                        None => self.client.repair_json(
+                            question,
+                            &outcome.content,
+                            &self.model,
+                            effort.as_deref(),
+                        )?,
+                    };
+                    on_delta(&outcome.content)?;
                 }
                 // Keep only the question and the answer. The tool calls and
                 // their results would otherwise be sent again with every
@@ -197,6 +218,7 @@ impl Agent {
 /// assumes it is still the year its training data ends in.
 fn system_prompt(instructions: &Instructions) -> String {
     let mut context = crate::clock::today();
+    context.push_str(OUTPUT_FORMAT);
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) && crate::diagram::images_supported() {
         context.push_str(DIAGRAMS);
     }
@@ -439,6 +461,158 @@ mod tests {
             triage: None,
             notice: None,
             messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn groq_can_read_a_workspace_file_and_stream_the_answer() {
+        let root = tempdir();
+        std::fs::write(root.join("notes.txt"), "the build command is cargo test").unwrap();
+        let (base, server) = serve(vec![
+            tool_call("read", r#"{"path":"notes.txt"}"#),
+            sse(&[r#"{"choices":[{"delta":{"content":"Run cargo test."}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        agent.client = Client::for_provider_test(&base, crate::cerebras::Provider::Groq);
+        agent.model = "groq:openai/gpt-oss-20b".to_owned();
+        agent.effort = Some("low".to_owned());
+        let mut streamed = String::new();
+        let answer = agent
+            .ask(
+                "how do I test this?",
+                &root,
+                &mut |delta| {
+                    streamed.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(answer, "Run cargo test.");
+        assert_eq!(streamed, answer);
+        let requests = server.join().unwrap();
+        for request in &requests {
+            let value: serde_json::Value = serde_json::from_str(request).unwrap();
+            assert_eq!(value["model"], "openai/gpt-oss-20b");
+            assert_eq!(value["reasoning_effort"], "low");
+            assert_eq!(value["include_reasoning"], false);
+        }
+        assert!(requests[1].contains("the build command is cargo test"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_json_is_repaired_without_printing_prose_or_mixing_tools_and_json_mode() {
+        let (base, server) = serve(vec![
+            sse(&[
+                r#"{"choices":[{"delta":{"content":"The read was blocked. ```json {\"blocked\":true} ```"}}]}"#,
+            ]),
+            sse(&[r#"{"choices":[{"delta":{"content":"{\"result\":{\"blocked\":true}}"}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        let mut emitted = String::new();
+        let answer = agent
+            .ask(
+                "If blocked, return only JSON with blocked: true.",
+                &std::env::temp_dir(),
+                &mut |delta| {
+                    emitted.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(answer, r#"{"blocked":true}"#);
+        assert_eq!(emitted, answer);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        let repair: serde_json::Value = serde_json::from_str(&requests[1]).unwrap();
+        assert!(repair.get("tools").is_none());
+        assert_eq!(repair["response_format"]["type"], "json_object");
+        assert_eq!(agent.messages.last().unwrap().content, answer);
+    }
+
+    #[test]
+    fn repaired_json_preserves_large_and_precise_numeric_values() {
+        for expected in [
+            r#"{"large":18446744073709551617,"decimal":0.123456789012345678901234567890}"#,
+            "[18446744073709551617, 0.123456789012345678901234567890]",
+            "18446744073709551617",
+            "1e400",
+        ] {
+            let envelope = format!("{{\"result\":{expected}}}");
+            let event = serde_json::json!({"choices":[{"delta":{"content":envelope}}]}).to_string();
+            let (base, server) = serve(vec![
+                sse(&[r#"{"choices":[{"delta":{"content":"Here is your JSON."}}]}"#]),
+                sse(&[&event]),
+            ]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let answer = agent
+                .ask(
+                    "Return only JSON.",
+                    &std::env::temp_dir(),
+                    &mut |delta| {
+                        emitted.push_str(delta);
+                        Ok(())
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert_eq!(answer, expected);
+            assert_eq!(emitted, expected);
+            assert_eq!(agent.messages.last().unwrap().content, expected);
+            assert_eq!(server.join().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn complete_json_and_whole_json_fences_need_no_extra_model_request() {
+        for content in [r#"{"code":"**literal**"}"#, "```json\n[1,2,3]\n```"] {
+            let event = serde_json::json!({"choices":[{"delta":{"content":content}}]}).to_string();
+            let (base, server) = serve(vec![sse(&[&event])]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let answer = agent
+                .ask(
+                    "Return only JSON.",
+                    &std::env::temp_dir(),
+                    &mut |delta| {
+                        emitted.push_str(delta);
+                        Ok(())
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert_eq!(answer, emitted);
+            assert!(serde_json::from_str::<serde_json::Value>(&answer).is_ok());
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_failed_json_repair_prints_nothing_and_is_not_saved() {
+        for invalid in ["still not JSON", "{}", r#"{"result":{},"other":true}"#] {
+            let event = serde_json::json!({"choices":[{"delta":{"content":invalid}}]}).to_string();
+            let (base, server) = serve(vec![
+                sse(&[r#"{"choices":[{"delta":{"content":"not JSON"}}]}"#]),
+                sse(&[&event]),
+            ]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let result = agent.ask(
+                "Return only JSON.",
+                &std::env::temp_dir(),
+                &mut |delta| {
+                    emitted.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            );
+            assert!(result.is_err());
+            assert!(emitted.is_empty());
+            assert!(agent.messages.is_empty());
+            assert_eq!(server.join().unwrap().len(), 2);
         }
     }
 

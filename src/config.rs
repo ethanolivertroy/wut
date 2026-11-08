@@ -296,20 +296,24 @@ impl Config {
             .and_then(Value::as_str)
             .and_then(ResponseColor::parse)
             .ok_or_else(|| invalid_config("config has invalid 'response_color'"))?;
+        let (model, reasoning) = cerebras::migrate_archived_model(
+            optional_string(value, "model")?,
+            optional_string(value, "reasoning")?,
+        );
         Ok(Self {
-            model: normalize_model(optional_string(value, "model")?),
-            reasoning: optional_string(value, "reasoning")?,
+            model: normalize_model(model)?,
+            reasoning,
             response_color,
             instructions: Instructions::from_json(value.get("instructions"))?,
         })
     }
 }
 
-fn normalize_model(model: Option<String>) -> Option<String> {
+fn normalize_model(model: Option<String>) -> Result<Option<String>> {
     let Some(model) = model else {
-        return Some(cerebras::default_model().to_owned());
+        return Ok(Some(cerebras::default_model().to_owned()));
     };
-    Some(cerebras::resolve_model(Some(&model)).to_owned())
+    Ok(Some(cerebras::require_model(&model)?.id.to_owned()))
 }
 
 fn load_file(path: &Path) -> Result<Config> {
@@ -434,5 +438,31 @@ mod tests {
         assert_eq!(config.model(), Some(cerebras::default_model()));
         assert_eq!(config.reasoning(), None);
         assert_eq!(config.instructions(), &Instructions::Concise);
+    }
+
+    #[test]
+    fn groq_models_survive_config_round_trips_and_unknown_models_fail() {
+        let mut config = Config::default();
+        config.set_model(Some("groq:openai/gpt-oss-20b".to_owned()));
+        config.set_reasoning(Some("low".to_owned()));
+        let saved = serde_json::from_slice(&config.bytes().unwrap()).unwrap();
+        let restored = load(saved).unwrap();
+        assert_eq!(restored.model(), Some("groq:openai/gpt-oss-20b"));
+        assert_eq!(restored.reasoning(), Some("low"));
+        let error = load(json!({"version": 4, "response_color": "default", "model": "typo"}))
+            .err()
+            .unwrap();
+        assert!(error.message().contains("unknown model"));
+    }
+
+    #[test]
+    fn archived_gemma_defaults_migrate_to_an_available_cerebras_model() {
+        for (old_effort, new_effort) in
+            [(Some("none"), "low"), (None, "low"), (Some("high"), "high")]
+        {
+            let config = load(json!({"version": 4, "response_color": "default", "model": "gemma-4-31b", "reasoning": old_effort})).unwrap();
+            assert_eq!(config.model(), Some("gpt-oss-120b"));
+            assert_eq!(config.reasoning(), Some(new_effort));
+        }
     }
 }

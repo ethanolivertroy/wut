@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-08",
+  "host": "zero",
+  "version": "0.0.4",
+  "source_commit": "2b855da924419edd180a7069ff20ec27479d66ea",
+  "scope": "Three synthetic direct-inference requests per model. These are observations from one host and prompt, not a general speed ranking. Groq was tested against local protocol fixtures, not live credentials.",
+  "prompt": "In one short sentence, explain what a terminal is. Do not use tools.",
+  "catalog": {
+    "endpoint": "https://api.cerebras.ai/v1/models",
+    "http_status": 200,
+    "model_ids": ["qwen-3.8-27b", "gpt-oss-120b"]
+  },
+  "benchmarks": [
+    {
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "samples": [
+        {"first_text_ms": 298.455113, "total_ms": 309.998241, "output_chars": 101},
+        {"first_text_ms": 303.391712, "total_ms": 307.78844300000003, "output_chars": 122},
+        {"first_text_ms": 270.009507, "total_ms": 280.673024, "output_chars": 107}
+      ],
+      "median_first_text_ms": 298.455113,
+      "median_total_ms": 307.78844300000003
+    },
+    {
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "samples": [
+        {"first_text_ms": 211.439937, "total_ms": 225.190413, "output_chars": 121},
+        {"first_text_ms": 202.671432, "total_ms": 214.806151, "output_chars": 122},
+        {"first_text_ms": 196.316107, "total_ms": 203.925836, "output_chars": 120}
+      ],
+      "median_first_text_ms": 202.671432,
+      "median_total_ms": 214.806151
+    }
+  ],
+  "end_to_end": {
+    "model": "gpt-oss-120b",
+    "reasoning": "low",
+    "exact_response": {"passed": true, "wall_ms": 349.319962086156},
+    "workspace_file_read": {"passed": true, "wall_ms": 1455.2707890979946}
+  },
+  "archived_model_probe": {
+    "model": "gemma-4-31b",
+    "http_status": 404,
+    "detail": "Model gemma-4-31b is archived and unavailable for the organization."
+  }
+}

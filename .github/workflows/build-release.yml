@@ -1,0 +1,107 @@
+name: Build release artifacts
+
+on:
+    workflow_call:
+        inputs:
+            tag:
+                description: Optional release tag to check out and validate
+                type: string
+                default: ""
+
+permissions:
+    contents: read
+
+env:
+    RUST_VERSION: "1.88.0"
+
+jobs:
+    build:
+        name: Build ${{ matrix.target }}
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: ubuntu-24.04
+                      target: x86_64-unknown-linux-musl
+                    - runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-musl
+                    - runner: macos-15-intel
+                      target: x86_64-apple-darwin
+                    - runner: macos-15
+                      target: aarch64-apple-darwin
+
+        env:
+            MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ inputs.tag || github.sha }}
+            - name: Verify release version
+              shell: bash
+              env:
+                  EXPECTED_TAG: ${{ inputs.tag }}
+              run: |
+                  crate_version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+                  [[ "$crate_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                  if [ -n "$EXPECTED_TAG" ]; then
+                    test "$EXPECTED_TAG" = "v$crate_version"
+                  else
+                    # Historical tags set the npm version during publishing.
+                    python3 -c 'import json, sys; assert json.load(open("npm/package.json"))["version"] == sys.argv[1], "npm and crate versions differ"' "$crate_version"
+                  fi
+            - name: Install release Rust
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
+                  rustup default "$RUST_VERSION"
+            - name: Install musl linker
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes musl-tools
+                  case "${{ matrix.target }}" in
+                    x86_64-*)
+                      echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      # QuickJS, used to draw diagrams, is C.
+                      echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                    aarch64-*)
+                      echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+                      # QuickJS, used to draw diagrams, is C.
+                      echo "CC_aarch64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+                      ;;
+                  esac
+            - name: Test
+              run: cargo test --locked --target "${{ matrix.target }}"
+            - name: Build
+              run: cargo build --locked --release --target "${{ matrix.target }}"
+            - name: Package
+              shell: bash
+              run: |
+                  target="${{ matrix.target }}"
+                  package="$RUNNER_TEMP/package"
+                  mkdir -p "$package" dist
+                  cp "target/$target/release/wut" README.md LICENSE "$package/"
+                  chmod 755 "$package/wut"
+                  version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+                  "$package/wut" -V | grep -Fx "$version"
+                  "$package/wut" --version | grep -Fx "$version"
+                  archive="wut-$target.tar.gz"
+                  tar -C "$package" -czf "dist/$archive" wut README.md LICENSE
+                  (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+                  tar -tzf "dist/$archive" | sort > "$RUNNER_TEMP/archive-contents"
+                  printf '%s\n' LICENSE README.md wut | diff - "$RUNNER_TEMP/archive-contents"
+            - name: Test packaged CLI and credential installer
+              # Older release tags predate these CLI options and Python tests.
+              if: inputs.tag == ''
+              run: |
+                  "$RUNNER_TEMP/package/wut" --models | grep -F "groq:openai/gpt-oss-20b"
+                  WUT_TEST_BINARY="$RUNNER_TEMP/package/wut" python3 -m unittest discover -s tests -p 'test_*.py'
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: release-${{ matrix.target }}
+                  path: dist/*
+                  if-no-files-found: error
+
