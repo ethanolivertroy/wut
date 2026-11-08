@@ -1,9 +1,9 @@
 [package]
 name = "wut"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.88"
-description = "A tiny, fast terminal assistant powered by Cerebras"
+description = "A tiny, fast terminal assistant powered by Cerebras or Groq"
 license = "MIT"
 repository = "https://github.com/ethanolivertroy/wut"
 readme = "README.md"

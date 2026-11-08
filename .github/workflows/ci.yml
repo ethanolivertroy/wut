@@ -7,6 +7,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - README.md
+      - CHANGELOG.md
       - LICENSE
       - "assets/**"
       - install.sh
@@ -22,6 +23,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - README.md
+      - CHANGELOG.md
       - LICENSE
       - "assets/**"
       - install.sh
@@ -58,6 +60,9 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo build --locked
+      - name: Verify crates.io source package
+        if: runner.os == 'Linux'
+        run: cargo package --locked
       - name: Test CLI providers and credential installation
         run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Lint installer
@@ -102,3 +107,7 @@ jobs:
           brew tap ethanolivertroy/wut "$GITHUB_WORKSPACE"
           brew install ethanolivertroy/wut/wut
           wut --version
+
+  release-artifacts:
+    name: Release artifacts
+    uses: ./.github/workflows/build-release.yml

@@ -96,3 +96,10 @@ returned valid JSON from both models but changed the requested string values;
 Qwen also changed a field name. That failure is retained. The explicit-object
 check distinguishes intact terminal output from model instruction following;
 it does not establish that arbitrary JSON contents are correct.
+
+The [standalone startup probe](2026-11-08-startup-zero.json) measures 30 warm
+process launches per command after five warmups, with isolated configuration
+and no API credentials. Median wall times were 0.65 ms for `--version`, 0.64 ms
+for `--help`, and 0.78 ms for `--models`, including Python subprocess overhead.
+The tested release binary was 6,329,192 bytes. These local command timings
+exclude network requests and do not describe npm wrapper startup overhead.

@@ -16,7 +16,7 @@ wut-x86_64-apple-darwin.tar.gz
 wut-x86_64-unknown-linux-musl.tar.gz
 "
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 formula="$script_dir/../Formula/wut.rb"
 
 error() {

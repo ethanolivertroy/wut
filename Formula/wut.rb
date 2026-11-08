@@ -1,5 +1,5 @@
 class Wut < Formula
-  desc "Tiny, fast terminal assistant powered by Cerebras"
+  desc "Tiny, fast terminal assistant powered by Cerebras or Groq"
   homepage "https://github.com/ethanolivertroy/wut"
   version "0.0.4"
   license "MIT"
@@ -38,10 +38,13 @@ class Wut < Formula
 
   def caveats
     <<~EOS
-      wut needs a Cerebras API key. Export it:
+      Set a provider API key in your process environment:
         export CEREBRAS_API_KEY=...
+      Or use Groq:
+        export GROQ_API_KEY=...
+        wut --model groq:openai/gpt-oss-20b "your question"
 
-      Or save it once, the way the official installer does:
+      Optional Cerebras storage is plaintext, not encrypted:
         mkdir -p ~/.config/wut && chmod 700 ~/.config/wut
         printf '%s\\n' YOUR_KEY > ~/.config/wut/credentials
         chmod 600 ~/.config/wut/credentials
