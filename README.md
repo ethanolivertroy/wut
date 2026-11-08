@@ -43,6 +43,10 @@ the same protections: wut refuses files or directories accessible to other users
 symlinks at either of those two paths, files owned by another user, and hard-linked
 credential files. Environment credentials take priority over saved credentials.
 
+Provider streams are limited to 1 MiB per line, 16 MiB per response, and 128
+tool-call slots. Over-limit or invalid streams fail without saving a completed
+turn. Diagnostics show terminal control characters as visible escape text.
+
 For Groq, set `GROQ_API_KEY` in the process environment. Groq never uses your
 Cerebras key or its saved credentials file. Choose a model in `wut --settings`,
 or pass its ID before a question:
@@ -87,6 +91,10 @@ carry your files off the machine.
 Workspace tools read only regular text files up to 512 KiB. Secret paths such as
 `.env` and `.ssh` are blocked even when they are symlinks to ordinary-looking
 files or directories.
+
+Glob patterns for `find` and the `grep` file filter are compiled once per search
+and limited to 512 bytes. `*` stays within one path component. Repeated wildcards
+use a non-backtracking matcher instead of recursively trying every combination.
 
 Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
 Jev model triage each question before it reaches Cerebras. One fast System One

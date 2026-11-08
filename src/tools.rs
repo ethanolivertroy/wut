@@ -123,6 +123,8 @@ const MAX_MATCH_LINES: usize = 200;
 const MAX_FIND_RESULTS: usize = 500;
 const MAX_FILE_BYTES: usize = 512 * 1_024;
 const MAX_WALK_ENTRIES: usize = 20_000;
+const MAX_GLOB_BYTES: usize = 512;
+const MAX_GLOB_REGEX_BYTES: usize = 256 * 1024;
 /// Folders a search walk never enters: they are huge or generated, and
 /// almost never what a question is about. Naming one as the path still works.
 const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules"];
@@ -340,6 +342,11 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
     let glob = string_argument(arguments, "glob", "grep", false)?;
     let pattern = regex::Regex::new(&pattern)
         .map_err(|error| tool_error("grep", format!("invalid pattern: {error}")))?;
+    let glob = if glob.is_empty() {
+        None
+    } else {
+        Some(Glob::compile(&glob, "grep")?)
+    };
 
     let mut lines: Vec<String> = Vec::new();
     let mut truncated = false;
@@ -353,7 +360,10 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         if is_denied(&path) || !path.is_file() {
             continue;
         }
-        if !glob.is_empty() && !glob_match(&glob, &file_name(&path)) {
+        if glob
+            .as_ref()
+            .is_some_and(|glob| !glob.matches(&file_name(&path)))
+        {
             continue;
         }
         let Ok(bytes) = read_text_file(&path) else {
@@ -419,6 +429,7 @@ fn read_text_file(path: &Path) -> std::io::Result<Vec<u8>> {
 
 fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<String> {
     let pattern = string_argument(arguments, "pattern", "find", true)?;
+    let pattern = Glob::compile(&pattern, "find")?;
     let mut results: Vec<String> = Vec::new();
     let mut truncated = false;
     let mut walk = walk(root);
@@ -434,7 +445,7 @@ fn find(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         if is_denied(path) {
             continue;
         }
-        if glob_match(&pattern, &text) || glob_match(&pattern, &file_name(path)) {
+        if pattern.matches(&text) || pattern.matches(&file_name(path)) {
             if results.len() >= MAX_FIND_RESULTS {
                 break;
             }
@@ -683,23 +694,64 @@ pub(crate) fn char_floor(text: &str, limit: usize) -> usize {
     end
 }
 
-fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_inner(pattern.as_bytes(), text.as_bytes())
+#[derive(Debug)]
+enum Glob {
+    Literal(Vec<u8>),
+    Suffix(Vec<u8>),
+    Pattern(regex::bytes::Regex),
 }
 
-fn glob_inner(pattern: &[u8], text: &[u8]) -> bool {
-    match (pattern.first(), text.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            let segment_end = text
-                .iter()
-                .position(|byte| *byte == b'/')
-                .unwrap_or(text.len());
-            (0..=segment_end).any(|index| glob_inner(&pattern[1..], &text[index..]))
+impl Glob {
+    /// Compile once per search. Common literal/suffix patterns avoid a regex;
+    /// other patterns use the existing non-backtracking regex engine.
+    fn compile(pattern: &str, tool: &str) -> Result<Self> {
+        if pattern.len() > MAX_GLOB_BYTES {
+            return Err(tool_error(
+                tool,
+                format!("glob exceeds {MAX_GLOB_BYTES} bytes; use a shorter pattern"),
+            ));
         }
-        (Some(b'?'), Some(_)) => glob_inner(&pattern[1..], &text[1..]),
-        (Some(a), Some(b)) if a == b => glob_inner(&pattern[1..], &text[1..]),
-        _ => false,
+        let has_wildcard = |byte: &u8| matches!(byte, b'*' | b'?');
+        if !pattern.as_bytes().iter().any(has_wildcard) {
+            return Ok(Self::Literal(pattern.as_bytes().to_vec()));
+        }
+        if let Some(suffix) = pattern.strip_prefix('*')
+            && !suffix.as_bytes().iter().any(has_wildcard)
+        {
+            return Ok(Self::Suffix(suffix.as_bytes().to_vec()));
+        }
+        let mut expression = String::from(r"\A");
+        let mut previous_star = false;
+        for character in pattern.chars() {
+            match character {
+                '*' if previous_star => continue,
+                '*' => expression.push_str("[^/]*"),
+                '?' => expression.push('.'),
+                other => expression.push_str(&regex::escape(&other.to_string())),
+            }
+            previous_star = character == '*';
+        }
+        expression.push_str(r"\z");
+        regex::bytes::RegexBuilder::new(&expression)
+            // Preserve byte-oriented '?' matching, including newline and '/'.
+            .unicode(false)
+            .dot_matches_new_line(true)
+            .size_limit(MAX_GLOB_REGEX_BYTES)
+            .dfa_size_limit(MAX_GLOB_REGEX_BYTES)
+            .build()
+            .map(Self::Pattern)
+            .map_err(|error| tool_error(tool, format!("could not compile glob: {error}")))
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        let text = text.as_bytes();
+        match self {
+            Self::Literal(literal) => text == literal,
+            Self::Suffix(suffix) => text
+                .strip_suffix(suffix.as_slice())
+                .is_some_and(|prefix| !prefix.contains(&b'/')),
+            Self::Pattern(pattern) => pattern.is_match(text),
+        }
     }
 }
 
@@ -736,6 +788,127 @@ mod tests {
         root: &std::path::Path,
     ) -> Result<String, String> {
         execute(name, &arguments, root).map_err(|error| error.to_string())
+    }
+
+    // Bounded fixtures only: retain the previous implementation as an oracle.
+    fn reference_glob(pattern: &[u8], text: &[u8]) -> bool {
+        match (pattern.first(), text.first()) {
+            (None, None) => true,
+            (Some(b'*'), _) => {
+                let end = text
+                    .iter()
+                    .position(|byte| *byte == b'/')
+                    .unwrap_or(text.len());
+                (0..=end).any(|index| reference_glob(&pattern[1..], &text[index..]))
+            }
+            (Some(b'?'), Some(_)) => reference_glob(&pattern[1..], &text[1..]),
+            (Some(a), Some(b)) if a == b => reference_glob(&pattern[1..], &text[1..]),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn compiled_globs_preserve_byte_and_separator_semantics() {
+        fn words(alphabet: &[char], length: usize) -> Vec<String> {
+            let mut all = vec![String::new()];
+            let mut level = vec![String::new()];
+            for _ in 0..length {
+                level = level
+                    .iter()
+                    .flat_map(|prefix| {
+                        alphabet
+                            .iter()
+                            .map(move |character| format!("{prefix}{character}"))
+                    })
+                    .collect();
+                all.extend(level.iter().cloned());
+            }
+            all
+        }
+        let texts = words(&['a', 'b', '/', '\n'], 3);
+        for pattern in words(&['a', 'b', '*', '?', '/'], 4) {
+            let compiled = super::Glob::compile(&pattern, "find").unwrap();
+            for text in &texts {
+                assert_eq!(
+                    compiled.matches(text),
+                    reference_glob(pattern.as_bytes(), text.as_bytes()),
+                    "{pattern:?} against {text:?}"
+                );
+            }
+        }
+        for pattern in ["é", "??", "?", "*é", "*?*", "a[b].rs", r"a\*.rs"] {
+            let compiled = super::Glob::compile(pattern, "find").unwrap();
+            for text in ["é", "a/b", "a[b].rs", "a\\test.rs", "\n", "☃"] {
+                assert_eq!(
+                    compiled.matches(text),
+                    reference_glob(pattern.as_bytes(), text.as_bytes()),
+                    "{pattern:?} against {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adversarial_globs_are_bounded_and_oversized_patterns_are_rejected() {
+        let compiled = super::Glob::compile(&format!("{}b", "*a".repeat(200)), "find").unwrap();
+        assert!(!compiled.matches(&"a".repeat(4096)));
+        let (base, workspace) = sandbox();
+        let long = "*".repeat(super::MAX_GLOB_BYTES + 1);
+        assert!(
+            run("find", json!({"pattern":long}), &workspace)
+                .unwrap_err()
+                .contains("glob exceeds")
+        );
+        assert!(
+            run("grep", json!({"pattern":"needle","glob":long}), &workspace)
+                .unwrap_err()
+                .contains("glob exceeds")
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[ignore = "local synthetic glob benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_glob_matching() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for (case, pattern, paths) in [
+            (
+                "common_suffix",
+                "*.rs".to_owned(),
+                (0..20_000)
+                    .map(|index| format!("module_{index:05}.rs"))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "repeated_wildcards",
+                format!("{}b", "*a".repeat(8)),
+                vec!["a".repeat(18); 8],
+            ),
+        ] {
+            let compiled = super::Glob::compile(&pattern, "find").unwrap();
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for _ in 0..5 {
+                let start = Instant::now();
+                for path in &paths {
+                    black_box(reference_glob(
+                        black_box(pattern.as_bytes()),
+                        black_box(path.as_bytes()),
+                    ));
+                }
+                before.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+                let start = Instant::now();
+                for path in &paths {
+                    black_box(compiled.matches(black_box(path)));
+                }
+                after.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+            }
+            println!(
+                "{}",
+                json!({"case":case,"paths_per_sample":paths.len(),"before_us":before,"after_us":after,"optimized":!cfg!(debug_assertions),"scope":"Local matcher calls only, compiled once per search; excludes filesystem work and model latency."})
+            );
+        }
     }
 
     #[test]

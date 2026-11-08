@@ -1,0 +1,62 @@
+{
+  "baseline_commit": "75fc8c9aaacc478fe3a85376d119e8942393181f",
+  "candidate_branch": "codex/bounded-tool-and-stream-inputs",
+  "candidate_files_sha256": {
+    "src/tools.rs": "13480ee30a1be4672cc8cdeadccfbcf37febca3becbbef397c674b39a0b58824",
+    "src/cerebras.rs": "5dadf0ef156dad4e022e439b804ec74ad3a5c34c31a905ecafa95998f5942e05",
+    "src/error.rs": "ddb8cff77a10fb00bee8222e82303fe99fb3c3dbff8dc7d12b658a13d768bc5c"
+  },
+  "profile": "cargo test --release",
+  "measurements": [
+    {
+      "after_us": [
+        296.954,
+        296.18100000000004,
+        320.231,
+        353.303,
+        321.122
+      ],
+      "before_us": [
+        2371.363,
+        2439.92,
+        2595.5029999999997,
+        2671.52,
+        2683.041
+      ],
+      "case": "common_suffix",
+      "optimized": true,
+      "paths_per_sample": 20000,
+      "scope": "Local matcher calls only, compiled once per search; excludes filesystem work and model latency.",
+      "median_before_us": 2595.5029999999997,
+      "median_after_us": 320.231
+    },
+    {
+      "after_us": [
+        23.238,
+        0.519,
+        0.49699999999999994,
+        0.468,
+        0.442
+      ],
+      "before_us": [
+        16321.464,
+        13924.315,
+        13176.853000000001,
+        13181.667,
+        12848.094
+      ],
+      "case": "repeated_wildcards",
+      "optimized": true,
+      "paths_per_sample": 8,
+      "scope": "Local matcher calls only, compiled once per search; excludes filesystem work and model latency.",
+      "median_before_us": 13181.667,
+      "median_after_us": 0.49699999999999994
+    }
+  ],
+  "timing_excludes": [
+    "pattern compilation",
+    "filesystem traversal and reads",
+    "provider latency"
+  ],
+  "scope": "Local synthetic matcher calls; not an end-to-end search or production latency estimate. The old matcher runs only on bounded test fixtures."
+}

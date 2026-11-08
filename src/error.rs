@@ -13,8 +13,8 @@ pub struct Error {
 impl Error {
     pub fn new(message: impl Into<String>, help: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
-            help: help.into(),
+            message: escape_controls(message.into()),
+            help: escape_controls(help.into()),
         }
     }
 
@@ -37,7 +37,7 @@ impl Error {
     }
 
     pub fn context(mut self, context: impl Display) -> Self {
-        self.message = format!("{context}: {}", self.message);
+        self.message = escape_controls(format!("{context}: {}", self.message));
         self
     }
 
@@ -63,3 +63,37 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Diagnostics may contain provider messages or attacker-controlled file names.
+/// Keep printable Unicode intact, but show controls as literal escape text.
+fn escape_controls(text: String) -> String {
+    if !text.chars().any(char::is_control) {
+        return text;
+    }
+    let mut safe = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            safe.extend(character.escape_default());
+        } else {
+            safe.push(character);
+        }
+    }
+    safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn diagnostics_escape_controls_in_messages_help_and_context() {
+        let error = Error::new("provider: \x1b]52;c;ZmFrZQ==\x07", "héllo\n\u{9b}2J")
+            .context("path\rspoofed");
+        assert!(!error.message().chars().any(char::is_control));
+        assert!(!error.help().chars().any(char::is_control));
+        assert!(error.message().contains(r"\u{1b}"));
+        assert!(error.message().contains(r"path\rspoofed"));
+        assert!(error.help().starts_with("héllo\\n"));
+        assert_eq!(Error::new("普通のエラー", "help").message(), "普通のエラー");
+    }
+}
