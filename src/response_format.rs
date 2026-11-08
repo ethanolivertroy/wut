@@ -47,6 +47,47 @@ pub fn validated_json(answer: &str) -> Option<String> {
     Some(body.to_owned())
 }
 
+/// Keep JSON values intact while preventing valid C1/DEL characters inside
+/// strings from reaching the terminal as controls. Outside strings, only JSON
+/// whitespace is possible; normalize carriage returns and tabs for display.
+pub fn terminal_json(answer: &str) -> String {
+    let mut output = String::with_capacity(answer.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in answer.chars() {
+        if in_string {
+            if escaped {
+                output.push(ch);
+                escaped = false;
+            } else {
+                match ch {
+                    '"' => {
+                        in_string = false;
+                        output.push(ch);
+                    }
+                    '\\' => {
+                        escaped = true;
+                        output.push(ch);
+                    }
+                    ch if ch.is_control() => output.push_str(&format!("\\u{:04x}", ch as u32)),
+                    _ => output.push(ch),
+                }
+            }
+        } else {
+            match ch {
+                '"' => {
+                    in_string = true;
+                    output.push(ch);
+                }
+                '\r' => {}
+                '\t' => output.push_str("    "),
+                _ => output.push(ch),
+            }
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +126,19 @@ mod tests {
         ] {
             assert_eq!(validated_json(answer), None, "{answer}");
         }
+    }
+
+    #[test]
+    fn terminal_json_preserves_values_and_escapes_controls() {
+        let value = serde_json::json!({"literal":"**bold** and `code`", "control":"\u{9b}31m\u{7f}", "quote":"a\\\"b"});
+        let original = format!("\t{}\r\n", value);
+        let displayed = terminal_json(&original);
+        assert!(!displayed.contains('\u{9b}'));
+        assert!(!displayed.contains('\u{7f}'));
+        assert!(displayed.contains("**bold** and `code`"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&displayed).unwrap(),
+            value
+        );
     }
 }

@@ -469,10 +469,8 @@ fn run_turn(
     response_color: config::ResponseColor,
 ) -> Result<String> {
     cancel::reset();
-    let output = std::cell::RefCell::new(TurnOutput::new(
-        decorate && !response_format::json_only(question),
-        response_color,
-    ));
+    let json_only = response_format::json_only(question);
+    let output = std::cell::RefCell::new(TurnOutput::new(decorate && !json_only, response_color));
     let spinner_enabled = decorate && spinner::enabled();
     let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
     let show_tools = std::io::IsTerminal::is_terminal(&std::io::stderr());
@@ -502,7 +500,14 @@ fn run_turn(
     let output = output.into_inner();
     let notice = agent.take_notice();
     let result = match answer {
-        Ok(answer) => output.finish(&answer).map(|()| answer),
+        Ok(answer) => {
+            let finished = if decorate && json_only {
+                output.finish(&response_format::terminal_json(&answer))
+            } else {
+                output.finish(&answer)
+            };
+            finished.map(|()| answer)
+        }
         Err(error) => {
             // End any partly streamed answer on its own line before the
             // error, or the next prompt would start mid-line.
