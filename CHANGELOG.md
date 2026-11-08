@@ -11,8 +11,9 @@
   `--benchmark` command for first-answer-text and completion latency.
 - Validate explicit JSON-only replies before printing them. Remove complete
   valid JSON fences, allow one tool-free formatting attempt for invalid drafts,
-  and preserve JSON string contents on terminals. This validates syntax, not
-  factual correctness or a user-provided schema.
+  and preserve JSON string contents on terminals. Preserve large integers and
+  high-precision decimals without floating-point conversion. This validates
+  syntax, not factual correctness or a user-provided schema.
 - Migrate archived Cerebras Gemma defaults and saved chats to GPT-OSS 120B with
   supported reasoning. Explicit archived-model choices report replacements.
 - Harden saved Cerebras credentials against unsafe permissions, ownership,

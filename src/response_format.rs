@@ -35,7 +35,7 @@ pub fn json_only(question: &str) -> bool {
 /// Never discard surrounding prose or silently accept a partial JSON value.
 pub fn validated_json(answer: &str) -> Option<String> {
     let trimmed = answer.trim();
-    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+    if serde_json::from_str::<&serde_json::value::RawValue>(trimmed).is_ok() {
         return Some(trimmed.to_owned());
     }
     let body = trimmed
@@ -43,7 +43,7 @@ pub fn validated_json(answer: &str) -> Option<String> {
         .or_else(|| trimmed.strip_prefix("```\n"))?
         .strip_suffix("\n```")?
         .trim();
-    serde_json::from_str::<serde_json::Value>(body).ok()?;
+    serde_json::from_str::<&serde_json::value::RawValue>(body).ok()?;
     Some(body.to_owned())
 }
 
@@ -126,6 +126,24 @@ mod tests {
         ] {
             assert_eq!(validated_json(answer), None, "{answer}");
         }
+    }
+
+    #[test]
+    fn validation_preserves_numbers_without_converting_them_to_floats() {
+        for answer in [
+            "18446744073709551617",
+            "0.123456789012345678901234567890",
+            "1e400",
+            "[18446744073709551617, 0.123456789012345678901234567890]",
+        ] {
+            assert_eq!(validated_json(answer).as_deref(), Some(answer));
+            assert_eq!(
+                validated_json(&format!("```json\n{answer}\n```")).as_deref(),
+                Some(answer)
+            );
+        }
+        assert_eq!(validated_json("1e"), None);
+        assert_eq!(validated_json("01"), None);
     }
 
     #[test]

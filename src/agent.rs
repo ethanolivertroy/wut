@@ -533,6 +533,40 @@ mod tests {
     }
 
     #[test]
+    fn repaired_json_preserves_large_and_precise_numeric_values() {
+        for expected in [
+            r#"{"large":18446744073709551617,"decimal":0.123456789012345678901234567890}"#,
+            "[18446744073709551617, 0.123456789012345678901234567890]",
+            "18446744073709551617",
+            "1e400",
+        ] {
+            let envelope = format!("{{\"result\":{expected}}}");
+            let event = serde_json::json!({"choices":[{"delta":{"content":envelope}}]}).to_string();
+            let (base, server) = serve(vec![
+                sse(&[r#"{"choices":[{"delta":{"content":"Here is your JSON."}}]}"#]),
+                sse(&[&event]),
+            ]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let answer = agent
+                .ask(
+                    "Return only JSON.",
+                    &std::env::temp_dir(),
+                    &mut |delta| {
+                        emitted.push_str(delta);
+                        Ok(())
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert_eq!(answer, expected);
+            assert_eq!(emitted, expected);
+            assert_eq!(agent.messages.last().unwrap().content, expected);
+            assert_eq!(server.join().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
     fn complete_json_and_whole_json_fences_need_no_extra_model_request() {
         for content in [r#"{"code":"**literal**"}"#, "```json\n[1,2,3]\n```"] {
             let event = serde_json::json!({"choices":[{"delta":{"content":content}}]}).to_string();

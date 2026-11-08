@@ -115,3 +115,10 @@ rejected while preserving the installed binary. No credential file was saved.
 The installed musl binary also passed a synthetic workspace-read/strict-JSON
 request against both live Cerebras models. These checks cover candidate files;
 published releases receive their own checksums when the release workflow runs.
+
+That packaging report predates the review fix for JSON numeric precision.
+The repair path now extracts a validated raw JSON value without parsing its
+numbers into floating point. Regression tests cover exact digits in large
+integers, long decimals, arrays, scalar values and large exponents, including
+the emitted answer and saved history. The final CI rebuilds all four targets
+with this fix; the earlier archive hashes identify the earlier candidate only.

@@ -19,7 +19,7 @@ pub const MODELS: &[Model] = &[
         id: "gpt-oss-120b",
         provider: Provider::Cerebras,
         name: "GPT OSS 120B",
-        description: "Fastest, lowest-cost Cerebras text model",
+        description: "Cerebras · low reasoning by default",
         default_reasoning: Some("low"),
         levels: &["low", "medium", "high"],
     },
@@ -362,14 +362,15 @@ impl Client {
         if !outcome.tool_calls.is_empty() {
             return Err(json_format_error());
         }
-        let envelope: Value =
+        // Validate the envelope without converting its result to floating point
+        // or reserializing it: JSON numbers can exceed machine precision.
+        let envelope: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
             serde_json::from_str(&outcome.content).map_err(|_| json_format_error())?;
-        let object = envelope
-            .as_object()
-            .filter(|object| object.len() == 1)
-            .ok_or_else(json_format_error)?;
-        let value = object.get("result").ok_or_else(json_format_error)?;
-        Ok(value.to_string())
+        if envelope.len() != 1 {
+            return Err(json_format_error());
+        }
+        let value = envelope.get("result").ok_or_else(json_format_error)?;
+        Ok(value.get().to_owned())
     }
 
     fn send_stream(
