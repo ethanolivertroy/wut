@@ -15,6 +15,9 @@ const TRIAGE_EXCHANGES: usize = 2;
 const WEB_SEARCH_BLOCKED: &str = "web_search is unavailable after workspace files have been read \
      in this question, so file contents cannot leave the machine; answer from what you have and \
      suggest the user ask about the web separately";
+const OUTPUT_FORMAT: &str = " Follow the user's requested output format exactly. \
+     If they request only JSON, return raw valid JSON without Markdown fences, headings, \
+     or surrounding prose. Use code fences only when the requested format allows them.";
 
 pub struct Agent {
     client: Client,
@@ -201,6 +204,7 @@ impl Agent {
 /// assumes it is still the year its training data ends in.
 fn system_prompt(instructions: &Instructions) -> String {
     let mut context = crate::clock::today();
+    context.push_str(OUTPUT_FORMAT);
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) && crate::diagram::images_supported() {
         context.push_str(DIAGRAMS);
     }
