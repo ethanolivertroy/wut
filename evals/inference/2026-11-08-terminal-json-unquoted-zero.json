@@ -1,0 +1,24 @@
+{
+  "case": "terminal_json_preserves_literal_markdown_values",
+  "passed": false,
+  "records": [
+    {
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": false,
+      "wall_ms": 347.1617440227419,
+      "output": "{\"literal\":\"keep\",\"code\":\"ls\"}\r\n",
+      "stderr": ""
+    },
+    {
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": false,
+      "wall_ms": 288.0366330500692,
+      "output": "{\"set\":\"keep\",\"code\":\"ls\"}\r\n",
+      "stderr": ""
+    }
+  ],
+  "source_commit": "a818f1f101d8edc3a17cf98332499e97065e08ad",
+  "scope": "Unquoted natural-language value-copy prompt; both replies were valid JSON but changed requested values. Superseded by an explicit-object probe that also compares terminal output with saved answers."
+}

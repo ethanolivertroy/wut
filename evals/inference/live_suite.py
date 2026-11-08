@@ -238,7 +238,11 @@ class Suite:
                      "Use exactly one paragraph, no line breaks, no markdown. Begin exactly STREAM_START."),
                     ("multiple_lines", "Explain how an HTTP request reaches a web server in 8 numbered steps. "
                      "Put each step on its own line, with about 20 words per step."),
+                    ("json_literal_values", 'Return only JSON. Copy this object exactly, including '
+                     'every asterisk and backtick inside its string values: '
+                     '{"literal":"**keep**","code":"`ls`"}'),
                 ]:
+                    state_before = snapshot(root / "state")
                     master, slave = pty.openpty()
                     start = time.monotonic()
                     process = subprocess.Popen(
@@ -280,12 +284,30 @@ class Suite:
                             process.wait()
                         os.close(master)
                     text = ansi.sub("", output.decode(errors="replace"))
-                    self.record({"case": "terminal_" + name, "model": model, "reasoning": effort,
+                    result = {"case": "terminal_" + name, "model": model, "reasoning": effort,
                         "passed": process.returncode == 0 and first_visible is not None and not timed_out,
                         "first_visible_ms": first_visible, "wall_ms": (time.monotonic() - start) * 1000,
                         "visible_chunks": chunks, "output_chars": len(text),
                         "nonempty_lines": sum(bool(line.strip()) for line in text.splitlines()),
-                        "stderr": stderr.decode(errors="replace")})
+                        "stderr": stderr.decode(errors="replace")}
+                    if name == "json_literal_values":
+                        try:
+                            displayed = json.loads(text)
+                            result["format_correct"] = True
+                            result["correct"] = displayed == {"literal": "**keep**", "code": "`ls`"}
+                            state_after = snapshot(root / "state")
+                            changed = [root / "state" / path for path, digest in state_after.items()
+                                       if state_before.get(path) != digest]
+                            result["matches_saved_answer"] = len(changed) == 1 and displayed == json.loads(
+                                json.loads(changed[0].read_text())["turns"][-1]["assistant"])
+                        except (ValueError, KeyError, IndexError):
+                            result["format_correct"] = False
+                            result["correct"] = False
+                            result["matches_saved_answer"] = False
+                        result["answer"] = text
+                        result["passed"] = (result["passed"] and result["correct"]
+                                            and result["matches_saved_answer"])
+                    self.record(result)
 
             model, effort = PROFILES[0]
             invalid = env.copy()

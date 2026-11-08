@@ -1,0 +1,133 @@
+{
+  "status": "finished",
+  "phase": "terminal",
+  "host": "zero",
+  "all_passed": true,
+  "binary": "/root/.local/bin/wut",
+  "profiles": [
+    {
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "latency_samples": 0,
+      "tasks_passed": 6,
+      "tasks_total": 6,
+      "tasks_content_correct": 6,
+      "format_failures": []
+    },
+    {
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "latency_samples": 0,
+      "tasks_passed": 3,
+      "tasks_total": 3,
+      "tasks_content_correct": 3,
+      "format_failures": []
+    }
+  ],
+  "records": [
+    {
+      "case": "terminal_one_paragraph",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true,
+      "first_visible_ms": 256.8163110408932,
+      "wall_ms": 491.75398889929056,
+      "visible_chunks": 39,
+      "output_chars": 1856,
+      "nonempty_lines": 1,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_multiple_lines",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true,
+      "first_visible_ms": 355.9546491596848,
+      "wall_ms": 455.8417990338057,
+      "visible_chunks": 8,
+      "output_chars": 891,
+      "nonempty_lines": 8,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_json_literal_values",
+      "model": "gpt-oss-120b",
+      "reasoning": "low",
+      "passed": true,
+      "first_visible_ms": 421.769498847425,
+      "wall_ms": 441.93646195344627,
+      "visible_chunks": 1,
+      "output_chars": 38,
+      "nonempty_lines": 1,
+      "stderr": "",
+      "format_correct": true,
+      "correct": true,
+      "matches_saved_answer": true,
+      "answer": "{\"literal\":\"**keep**\",\"code\":\"`ls`\"}\r\n"
+    },
+    {
+      "case": "terminal_one_paragraph",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true,
+      "first_visible_ms": 268.973995000124,
+      "wall_ms": 695.55081310682,
+      "visible_chunks": 74,
+      "output_chars": 1976,
+      "nonempty_lines": 1,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_multiple_lines",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true,
+      "first_visible_ms": 301.12397321499884,
+      "wall_ms": 434.9278090521693,
+      "visible_chunks": 8,
+      "output_chars": 855,
+      "nonempty_lines": 8,
+      "stderr": ""
+    },
+    {
+      "case": "terminal_json_literal_values",
+      "model": "qwen-3.8-27b",
+      "reasoning": "none",
+      "passed": true,
+      "first_visible_ms": 280.2932308986783,
+      "wall_ms": 300.83979293704033,
+      "visible_chunks": 1,
+      "output_chars": 38,
+      "nonempty_lines": 1,
+      "stderr": "",
+      "format_correct": true,
+      "correct": true,
+      "matches_saved_answer": true,
+      "answer": "{\"literal\":\"**keep**\",\"code\":\"`ls`\"}\r\n"
+    },
+    {
+      "case": "invalid_key",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "wall_ms": 154.6517990063876,
+      "stderr": "wut: the inference endpoint returned HTTP 401: Wrong API Key\r\n     check your API key and try again\r\n"
+    },
+    {
+      "case": "valid_key_after_rejection",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "wall_ms": 260.51016501151025,
+      "stderr": ""
+    },
+    {
+      "case": "one_shot_sigint",
+      "model": "gpt-oss-120b",
+      "passed": true,
+      "exit_code": -2,
+      "wall_ms": 52.682877983897924
+    }
+  ],
+  "scoring": "JSON tasks require raw JSON without Markdown fences. Content correctness and format correctness are recorded separately.",
+  "scope": "Visible terminal output, invalid-key recovery, and one-shot SIGINT checks. No TypeSafe or web search. Not a global ranking or production reliability estimate.",
+  "source_commit": "a818f1f101d8edc3a17cf98332499e97065e08ad"
+}

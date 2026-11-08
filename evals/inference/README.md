@@ -22,7 +22,8 @@ fail the format check even if the enclosed values are correct.
 
 The terminal phase measures when text actually appears on a terminal for one
 paragraph and multiple lines. It also checks invalid-key errors, recovery with
-a valid key, and one-shot SIGINT cancellation without saving an incomplete turn.
+a valid key, JSON string values containing literal Markdown characters, and
+one-shot SIGINT cancellation without saving an incomplete turn.
 It does not test the interactive prompt's cancellation behavior.
 
 ## Recorded run on zero, 2026-11-08
@@ -81,3 +82,17 @@ with an environment key using:
 ```sh
 cargo test --locked cerebras::tests::live_json_formatter_preserves_objects_and_arrays -- --exact --ignored
 ```
+
+The [final installed-build terminal run](2026-11-08-terminal-final-zero.json)
+passed all nine checks. First paragraph text appeared at 257 ms for GPT-OSS and
+269 ms for Qwen, in 39 and 74 visible chunks. Both models copied an explicit
+JSON object with literal `**keep**` and backtick characters intact, and the
+terminal's parsed output matched the saved answer. Terminal JSON bypasses
+Markdown rendering; embedded control characters are escaped without changing
+the parsed values.
+
+An earlier [unquoted value-copy probe](2026-11-08-terminal-json-unquoted-zero.json)
+returned valid JSON from both models but changed the requested string values;
+Qwen also changed a field name. That failure is retained. The explicit-object
+check distinguishes intact terminal output from model instruction following;
+it does not establish that arbitrary JSON contents are correct.
