@@ -1,7 +1,7 @@
 class Wut < Formula
   desc "Tiny, fast terminal assistant powered by Cerebras or Groq"
   homepage "https://github.com/ethanolivertroy/wut"
-  version "0.0.4"
+  version "0.0.5"
   license "MIT"
 
   livecheck do
@@ -11,23 +11,23 @@ class Wut < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.4/wut-aarch64-apple-darwin.tar.gz"
-      sha256 "f55df6d8cf1cf748f0988d0fe2d1014610f7d809304ab5fdb2cb95b7949c4b40"
+      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.5/wut-aarch64-apple-darwin.tar.gz"
+      sha256 "3fe7e5075106d62f78bbfd5d2eb82e4e606c4446424907e2e0d76f396607c207"
     end
     on_intel do
-      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.4/wut-x86_64-apple-darwin.tar.gz"
-      sha256 "e11af5c772b33e9705fa951b726df1f5d0448f7830668ce0e50e92c69f0921df"
+      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.5/wut-x86_64-apple-darwin.tar.gz"
+      sha256 "96562e4f279ad4a9555080967071236189f6e6f5ab527306e474325ee9d3d20f"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.4/wut-aarch64-unknown-linux-musl.tar.gz"
-      sha256 "98a1b7fe1fa4b21ed8bacc2ba2bdeeef9b452a8af5ffc884fc20dbcccb1ee6b0"
+      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.5/wut-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "f94db4a3cd20ffab69bbe2d1bc3535d623a100383f2681034c18fcabcb063beb"
     end
     on_intel do
-      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.4/wut-x86_64-unknown-linux-musl.tar.gz"
-      sha256 "0176ae37af486fdb92dfa1c0d66310d188a883db6fea1bb5fae6cb296a30be97"
+      url "https://github.com/ethanolivertroy/wut/releases/download/v0.0.5/wut-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "cc08c878621b0b363f381ef1c79f04a92fdcf1ba7057c0122ba59cea196be37a"
     end
   end
 
