@@ -329,6 +329,51 @@ impl Client {
             ));
         }
         let body = request_body(messages, tools, model, effort);
+        self.send_stream(body, on_delta)
+    }
+
+    /// Format a failed JSON-only draft without mixing tools and JSON mode.
+    /// An object envelope allows the requested value to be an array or scalar.
+    pub fn repair_json(
+        &self,
+        question: &str,
+        draft: &str,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<String> {
+        if require_model(model)?.provider != self.provider {
+            return Err(Error::internal(
+                "the selected model belongs to a different provider",
+            ));
+        }
+        let messages = [
+            Message::text(
+                Role::System,
+                "Convert the draft to the JSON value requested by the user. Preserve its data and types. Return one JSON object with exactly one key, result, containing the requested JSON value. No other keys, Markdown, or prose. You have no tools.",
+            ),
+            Message::text(
+                Role::User,
+                json!({"request": question, "draft": draft}).to_string(),
+            ),
+        ];
+        let mut body = request_body(&messages, &[], model, effort);
+        body["response_format"] = json!({"type": "json_object"});
+        let outcome = self.send_stream(body, &mut |_| Ok(()))?;
+        let envelope: Value =
+            serde_json::from_str(&outcome.content).map_err(|_| json_format_error())?;
+        let object = envelope
+            .as_object()
+            .filter(|object| object.len() == 1)
+            .ok_or_else(json_format_error)?;
+        let value = object.get("result").ok_or_else(json_format_error)?;
+        Ok(value.to_string())
+    }
+
+    fn send_stream(
+        &self,
+        body: Value,
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+    ) -> Result<Outcome> {
         let response = self
             .http
             .post(&format!("{}/chat/completions", self.base_url))
@@ -346,6 +391,13 @@ impl Client {
         let stream = EventStream::new(BufReader::new(response.into_reader()));
         collect_stream(stream, on_delta)
     }
+}
+
+fn json_format_error() -> Error {
+    Error::new(
+        "the model did not return valid JSON after one formatting attempt",
+        "try again or choose a different model; no malformed JSON was printed",
+    )
 }
 
 fn http_agent() -> ureq::Agent {

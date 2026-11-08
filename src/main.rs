@@ -11,6 +11,7 @@ mod instructions;
 mod output;
 mod prompt;
 mod render;
+mod response_format;
 mod select;
 mod settings_ui;
 mod spinner;
@@ -468,7 +469,10 @@ fn run_turn(
     response_color: config::ResponseColor,
 ) -> Result<String> {
     cancel::reset();
-    let output = std::cell::RefCell::new(TurnOutput::new(decorate, response_color));
+    let output = std::cell::RefCell::new(TurnOutput::new(
+        decorate && !response_format::json_only(question),
+        response_color,
+    ));
     let spinner_enabled = decorate && spinner::enabled();
     let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
     let show_tools = std::io::IsTerminal::is_terminal(&std::io::stderr());

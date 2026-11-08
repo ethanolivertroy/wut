@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::cerebras::{self, Client, Message, Outcome, Role};
 use crate::error::{Error, Result};
 use crate::instructions::Instructions;
+use crate::response_format;
 use crate::state::Turn;
 use crate::tools::{self, ToolSet};
 use crate::triage::{self, Plan};
@@ -96,17 +97,18 @@ impl Agent {
         let plan = self.plan(question, root);
         let effort = self.turn_effort(plan.effort);
         let start = self.messages.len();
+        let json_only = response_format::json_only(question);
         self.messages.push(Message::text(Role::User, question));
         let mut read_files = false;
         for _ in 0..MAX_TURNS {
             crate::cancel::check()?;
             let tools = tools::catalog(plan.tools.union(tools_in_history(&self.messages)));
-            let outcome = self.client.stream(
+            let mut outcome = self.client.stream(
                 &self.messages,
                 &tools,
                 &self.model,
                 effort.as_deref(),
-                on_delta,
+                &mut |delta| if json_only { Ok(()) } else { on_delta(delta) },
             )?;
             if outcome.tool_calls.is_empty() {
                 if outcome.content.trim().is_empty() {
@@ -114,6 +116,18 @@ impl Agent {
                         "the model completed without returning an answer",
                         "try again; if it keeps happening, lower the reasoning level",
                     ));
+                }
+                if json_only {
+                    outcome.content = match response_format::validated_json(&outcome.content) {
+                        Some(json) => json,
+                        None => self.client.repair_json(
+                            question,
+                            &outcome.content,
+                            &self.model,
+                            effort.as_deref(),
+                        )?,
+                    };
+                    on_delta(&outcome.content)?;
                 }
                 // Keep only the question and the answer. The tool calls and
                 // their results would otherwise be sent again with every
@@ -485,6 +499,87 @@ mod tests {
         }
         assert!(requests[1].contains("the build command is cargo test"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_json_is_repaired_without_printing_prose_or_mixing_tools_and_json_mode() {
+        let (base, server) = serve(vec![
+            sse(&[
+                r#"{"choices":[{"delta":{"content":"The read was blocked. ```json {\"blocked\":true} ```"}}]}"#,
+            ]),
+            sse(&[r#"{"choices":[{"delta":{"content":"{\"result\":{\"blocked\":true}}"}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        let mut emitted = String::new();
+        let answer = agent
+            .ask(
+                "If blocked, return only JSON with blocked: true.",
+                &std::env::temp_dir(),
+                &mut |delta| {
+                    emitted.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(answer, r#"{"blocked":true}"#);
+        assert_eq!(emitted, answer);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        let repair: serde_json::Value = serde_json::from_str(&requests[1]).unwrap();
+        assert!(repair.get("tools").is_none());
+        assert_eq!(repair["response_format"]["type"], "json_object");
+        assert_eq!(agent.messages.last().unwrap().content, answer);
+    }
+
+    #[test]
+    fn complete_json_and_whole_json_fences_need_no_extra_model_request() {
+        for content in [r#"{"code":"**literal**"}"#, "```json\n[1,2,3]\n```"] {
+            let event = serde_json::json!({"choices":[{"delta":{"content":content}}]}).to_string();
+            let (base, server) = serve(vec![sse(&[&event])]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let answer = agent
+                .ask(
+                    "Return only JSON.",
+                    &std::env::temp_dir(),
+                    &mut |delta| {
+                        emitted.push_str(delta);
+                        Ok(())
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+            assert_eq!(answer, emitted);
+            assert!(serde_json::from_str::<serde_json::Value>(&answer).is_ok());
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_failed_json_repair_prints_nothing_and_is_not_saved() {
+        for invalid in ["still not JSON", "{}", r#"{"result":{},"other":true}"#] {
+            let event = serde_json::json!({"choices":[{"delta":{"content":invalid}}]}).to_string();
+            let (base, server) = serve(vec![
+                sse(&[r#"{"choices":[{"delta":{"content":"not JSON"}}]}"#]),
+                sse(&[&event]),
+            ]);
+            let mut agent = test_agent(&base);
+            let mut emitted = String::new();
+            let result = agent.ask(
+                "Return only JSON.",
+                &std::env::temp_dir(),
+                &mut |delta| {
+                    emitted.push_str(delta);
+                    Ok(())
+                },
+                &mut |_| {},
+            );
+            assert!(result.is_err());
+            assert!(emitted.is_empty());
+            assert!(agent.messages.is_empty());
+            assert_eq!(server.join().unwrap().len(), 2);
+        }
     }
 
     fn tool_call(name: &str, arguments: &str) -> String {
