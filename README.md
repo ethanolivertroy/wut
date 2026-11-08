@@ -132,3 +132,8 @@ diagram and wut renders it inline with [Pele](https://pele.run). Piped output
 and other terminals get the Mermaid text instead. Set `WUT_IMAGES=0` to turn
 diagrams off, or `WUT_IMAGES=1` to turn them on in a terminal wut doesn't
 recognize.
+
+Diagrams are rasterized to fit their display width, with a 16 MiB pixel-buffer
+limit. Oversized images fall back to Mermaid text. Diagram image references
+cannot load local files or embedded images; ordinary vector shapes and labels
+continue to render.

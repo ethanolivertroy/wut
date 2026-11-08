@@ -1,6 +1,16 @@
 # Changes
 
-## 0.0.5 (unreleased)
+## Unreleased
+
+- Rasterize diagrams to their terminal display width and cap the pixel buffer
+  at 16 MiB, falling back to Mermaid text for oversized images.
+- Disable local-file and embedded-image references in diagrams, including
+  nested SVG images that could bypass workspace restrictions or pixel limits.
+- Download npm release archives and checksums concurrently, with a shared
+  60-second deadline and bounded response sizes. Cancel failed download pairs
+  and preserve an existing cached binary on failure.
+
+## 0.0.5 — 2026-11-08
 
 - Stream ordinary terminal paragraphs before a newline or completion, while
   preserving inline Markdown and complete code-block/diagram rendering.

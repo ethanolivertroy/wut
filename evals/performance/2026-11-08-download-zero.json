@@ -1,0 +1,63 @@
+{
+  "baseline_commit": "e40f87191520d4c6749913b7001d6739b70ab489",
+  "candidate_branch": "codex/bounded-downloads-and-diagrams",
+  "candidate_files_sha256": {
+    "npm/lib/release.js": "c714db08526ba2e449f4643466295f90de9034b01844c042ab19dbf7aeaa8c29",
+    "src/diagram.rs": "ff61e783e8c31100dbedb24ac4496d9ad3e03ac5b061629a8b88ddef171dced6"
+  },
+  "download_before": {
+    "case": "cold_cache_archive_download",
+    "artificial_response_delay_ms": 100,
+    "samples_ms": [
+      237.12665900000002,
+      220.75008200000002,
+      219.05256099999997,
+      238.62463500000013,
+      220.08336299999996
+    ],
+    "median_ms": 220.75008200000002,
+    "scope": "Local synthetic archives, 100 ms added per response, five measured runs after one warmup; not a real network speed estimate."
+  },
+  "download_after": {
+    "case": "cold_cache_archive_download",
+    "artificial_response_delay_ms": 100,
+    "samples_ms": [
+      108.055949,
+      109.02780900000005,
+      108.43683700000003,
+      108.97266600000006,
+      118.60207600000001
+    ],
+    "median_ms": 108.97266600000006,
+    "scope": "Local synthetic archives, 100 ms added per response, five measured runs after one warmup; not a real network speed estimate."
+  },
+  "download_reproduction": {
+    "case": "cold_cache_archive_download",
+    "artificial_response_delay_ms": 100,
+    "samples_ms": [
+      124.76682000000002,
+      114.74415799999997,
+      116.352891,
+      139.435381,
+      117.81305599999996
+    ],
+    "median_ms": 117.81305599999996,
+    "scope": "Five local synthetic downloads after one warmup. Includes 100 ms added per response; not a real network speed estimate."
+  },
+  "reproduction_context": "The second after-change run overlapped a local release build. All samples are retained; no speed threshold is imposed by tests.",
+  "diagram_geometry": {
+    "fixture": "5000 by 400 CSS-pixel SVG, displayed at 640 device pixels wide",
+    "before": {
+      "width": 10000,
+      "height": 800,
+      "rgba_bytes": 32000000
+    },
+    "after": {
+      "width": 640,
+      "height": 52,
+      "rgba_bytes": 133120
+    },
+    "evidence": "Before uses the prior fixed 2x scale; after dimensions are asserted from PNG headers by the rasterization regression test. This compares pixel work, not measured rendering time."
+  },
+  "scope": "Local synthetic fixtures only; no provider credentials or real user files."
+}

@@ -21,6 +21,9 @@ const RENDER_BUDGET: Duration = Duration::from_secs(2);
 const JS_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Rendered at twice the diagram's size so it stays sharp on retina screens.
 const SCALE: f32 = 2.0;
+/// Cap the RGBA image at 16 MiB before allocating its pixel buffer.
+const MAX_PIXELS: u64 = 4 * 1024 * 1024;
+const MAX_DIMENSION: usize = 8192;
 /// Width of a terminal cell in CSS pixels when the terminal doesn't say.
 const FALLBACK_CELL_WIDTH: usize = 9;
 const KITTY_CHUNK: usize = 4096;
@@ -43,10 +46,15 @@ pub fn images_supported() -> bool {
 /// syntax error.
 pub fn draw(source: &str, max_columns: usize) -> Result<String, String> {
     let rendered = render_svg(source)?;
-    let png = rasterize(&resolve_colors(&rendered.svg))?;
+    let cell_width = cell_width();
+    let max_width = max_columns
+        .max(1)
+        .saturating_mul(cell_width)
+        .saturating_mul(SCALE as usize);
+    let png = rasterize(&resolve_colors(&rendered.svg), max_width)?;
     let columns = rendered
         .width
-        .div_ceil(cell_width())
+        .div_ceil(cell_width)
         .clamp(1, max_columns.max(1));
     Ok(kitty_escapes(&png, columns))
 }
@@ -89,7 +97,7 @@ fn render_svg(source: &str) -> Result<Rendered, String> {
             ctx.eval::<String, _>(
                 r#"(() => {
                     try {
-                        const r = pele.render(__wut_source, { responsive: false, padding: 16 });
+                        const r = pele.render(__wut_source, { responsive: false, padding: 16, images: false });
                         return JSON.stringify({ svg: r.svg, width: r.width });
                     } catch (e) {
                         return JSON.stringify({ error: String((e && e.message) || e) });
@@ -210,11 +218,19 @@ fn substitute(svg: &str, declared: &HashMap<String, String>) -> String {
     out
 }
 
-fn rasterize(svg: &str) -> Result<Vec<u8>, String> {
+fn rasterize(svg: &str, max_width: usize) -> Result<Vec<u8>, String> {
     FONTS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let options = slot.get_or_insert_with(|| {
-            let mut options = usvg::Options::default();
+            // SVG references must not bypass workspace file restrictions or
+            // introduce independent raster-image allocations before our cap.
+            let mut options = usvg::Options {
+                image_href_resolver: usvg::ImageHrefResolver {
+                    resolve_data: Box::new(|_, _, _| None),
+                    resolve_string: Box::new(|_, _| None),
+                },
+                ..usvg::Options::default()
+            };
             options.fontdb_mut().load_system_fonts();
             for family in ["Helvetica", "Arial", "DejaVu Sans", "Liberation Sans"] {
                 if options
@@ -231,11 +247,7 @@ fn rasterize(svg: &str) -> Result<Vec<u8>, String> {
         });
         let tree = usvg::Tree::from_str(svg, options)
             .map_err(|error| format!("could not read Pele's SVG: {error}"))?;
-        let size = tree
-            .size()
-            .to_int_size()
-            .scale_by(SCALE)
-            .ok_or("the diagram is empty")?;
+        let (size, scale) = raster_geometry(tree.size().width(), tree.size().height(), max_width)?;
         let mut pixmap = tiny_skia::Pixmap::new(size.width(), size.height())
             .ok_or("the diagram is too large to draw")?;
         // The SVG has no background of its own, and dark lines would vanish
@@ -243,13 +255,37 @@ fn rasterize(svg: &str) -> Result<Vec<u8>, String> {
         pixmap.fill(tiny_skia::Color::WHITE);
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(SCALE, SCALE),
+            tiny_skia::Transform::from_scale(scale, scale),
             &mut pixmap.as_mut(),
         );
         pixmap
             .encode_png()
             .map_err(|error| format!("could not encode the diagram: {error}"))
     })
+}
+
+/// Match the terminal's display width before allocating, then reject tall or
+/// oversized canvases. The caller falls back to the original Mermaid text.
+fn raster_geometry(
+    width: f32,
+    height: f32,
+    max_width: usize,
+) -> Result<(tiny_skia::IntSize, f32), String> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err("the diagram is empty".to_owned());
+    }
+    let max_width = max_width.clamp(1, MAX_DIMENSION);
+    let scale = f64::from(SCALE).min(max_width as f64 / f64::from(width));
+    let pixels_wide = (f64::from(width) * scale).ceil().min(max_width as f64) as u32;
+    let pixels_high = (f64::from(height) * scale).ceil();
+    if pixels_high > MAX_DIMENSION as f64
+        || u64::from(pixels_wide) * pixels_high as u64 > MAX_PIXELS
+    {
+        return Err("the diagram is too large to draw".to_owned());
+    }
+    let size = tiny_skia::IntSize::from_wh(pixels_wide, pixels_high as u32)
+        .ok_or("the diagram is empty")?;
+    Ok((size, scale as f32))
 }
 
 /// The width of a terminal cell in CSS pixels, from the terminal's reported
@@ -311,7 +347,8 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        KITTY_CHUNK, base64, draw, first_line, kitty_escapes, rasterize, render_svg, resolve_colors,
+        KITTY_CHUNK, MAX_DIMENSION, MAX_PIXELS, base64, draw, first_line, kitty_escapes,
+        raster_geometry, rasterize, render_svg, resolve_colors,
     };
 
     const FLOWCHART: &str = "flowchart LR\n  A[Question] --> B{Tools?}\n  B -- yes --> C[grep]\n  B -- no --> D[Answer]\n  C --> D";
@@ -334,6 +371,15 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_image_nodes_keep_their_labels_without_image_references() {
+        let rendered =
+            render_svg("flowchart LR\n A@{ img: \"private.svg\", label: \"Picture\", h: 40 }")
+                .unwrap();
+        assert!(rendered.svg.contains("Picture"));
+        assert!(!rendered.svg.contains("<image"));
+    }
+
+    #[test]
     fn resolves_every_variable() {
         let svg = resolve_colors(
             r#"<svg style="--_bg:var(--pele-bg,#fff);--_s:var(--pele-surface,#f3f3f3);--_r:var(--pele-radius,4px)"><rect fill="var(--_s)" style="rx:var(--_r)"/><text fill="var(--_missing, rgb(1,2,3))"/></svg>"#,
@@ -349,7 +395,7 @@ mod tests {
     #[test]
     fn rasterizes_at_twice_the_size() {
         let rendered = render_svg(FLOWCHART).unwrap();
-        let png = rasterize(&resolve_colors(&rendered.svg)).unwrap();
+        let png = rasterize(&resolve_colors(&rendered.svg), MAX_DIMENSION).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         let width = u32::from_be_bytes(png[16..20].try_into().unwrap()) as usize;
         assert!(
@@ -357,6 +403,75 @@ mod tests {
             "{width} vs {}",
             rendered.width
         );
+    }
+
+    #[test]
+    fn wide_diagrams_are_rasterized_at_the_display_width() {
+        let png = rasterize(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="5000" height="400"><rect width="5000" height="400"/></svg>"#,
+            640,
+        )
+        .unwrap();
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!(width, 640);
+        assert_eq!(height, 52);
+        assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+    }
+
+    #[test]
+    fn image_limits_are_checked_before_pixel_allocation() {
+        assert!(raster_geometry(2000.0, 2000.0, MAX_DIMENSION).is_err());
+        assert!(raster_geometry(1.0, 100_000_000.0, 640).is_err());
+        assert!(raster_geometry(f32::MAX, f32::MAX, usize::MAX).is_err());
+        for invalid in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+            assert!(raster_geometry(invalid, 1.0, 640).is_err());
+            assert!(raster_geometry(1.0, invalid, 640).is_err());
+        }
+        let (size, _) = raster_geometry(1024.0, 1024.0, usize::MAX).unwrap();
+        assert_eq!(
+            u64::from(size.width()) * u64::from(size.height()),
+            MAX_PIXELS
+        );
+        let (size, _) = raster_geometry(10.0, 10.0, 0).unwrap();
+        assert_eq!(size.width(), 1);
+    }
+
+    #[test]
+    fn svg_images_cannot_load_local_files_or_embedded_images() {
+        let image = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
+        let path = std::env::temp_dir().join(format!(
+            "wut-diagram-private-{}-{}.svg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, image).unwrap();
+        let hrefs = [
+            path.to_string_lossy().into_owned(),
+            format!("data:image/svg+xml;base64,{}", base64(image.as_bytes())),
+        ];
+        let results: Vec<_> = hrefs
+            .iter()
+            .map(|href| {
+                let href = href.replace('&', "&amp;").replace('"', "&quot;");
+                rasterize(
+                    &format!(
+                        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="{href}" width="10" height="10"/></svg>"#
+                    ),
+                    40,
+                )
+            })
+            .collect();
+        std::fs::remove_file(path).unwrap();
+        for result in results {
+            let pixels = super::tiny_skia::Pixmap::decode_png(&result.unwrap()).unwrap();
+            assert!(pixels.pixels().iter().all(|pixel| {
+                pixel.red() == 255 && pixel.green() == 255 && pixel.blue() == 255
+            }));
+        }
     }
 
     #[test]
