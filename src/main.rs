@@ -156,15 +156,18 @@ impl Settings {
 
     fn resolve(config: &config::Config, session: Option<&state::Session>) -> Self {
         let saved = session.and_then(|session| session.settings.as_ref());
+        let model = saved.map_or_else(
+            || config.model().map(str::to_owned),
+            |settings| settings.model.clone(),
+        );
+        let reasoning = saved.map_or_else(
+            || config.reasoning().map(str::to_owned),
+            |settings| settings.reasoning.clone(),
+        );
+        let (model, reasoning) = cerebras::migrate_archived_model(model, reasoning);
         Self {
-            model: saved.map_or_else(
-                || config.model().map(str::to_owned),
-                |settings| settings.model.clone(),
-            ),
-            reasoning: saved.map_or_else(
-                || config.reasoning().map(str::to_owned),
-                |settings| settings.reasoning.clone(),
-            ),
+            model,
+            reasoning,
             response_color: config.response_color(),
         }
     }
@@ -758,6 +761,24 @@ mod tests {
         assert!(!is_command("/etc/hosts what are these perms?"));
         assert!(!is_command("/usr/bin/env -S"));
         assert!(!is_command("what is /settings"));
+    }
+
+    #[test]
+    fn continued_gemma_sessions_migrate_without_reusing_unsupported_effort() {
+        let config = crate::config::Config::default();
+        let mut session =
+            crate::state::Session::new("wut", "test".to_owned(), std::path::Path::new("/tmp"));
+        session.settings = Some(crate::state::SessionSettings {
+            model: Some("gemma-4-31b".to_owned()),
+            reasoning: Some("none".to_owned()),
+        });
+        let settings = super::Settings::resolve(&config, Some(&session));
+        assert_eq!(settings.model.as_deref(), Some("gpt-oss-120b"));
+        assert_eq!(settings.reasoning.as_deref(), Some("low"));
+        assert_eq!(
+            session.settings.unwrap().model.as_deref(),
+            Some("gemma-4-31b")
+        );
     }
 
     #[test]

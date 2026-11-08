@@ -58,6 +58,10 @@ The Groq choices are GPT-OSS 20B and 120B, both with low reasoning by default.
 TypeSafe integration. Command-line model choices leave your saved defaults
 unchanged. A continued chat remembers its model unless you override it.
 
+Cerebras has archived Gemma 4 31B. Existing Gemma defaults and saved chats use
+GPT-OSS 120B on Cerebras instead; its unsupported `none` reasoning level becomes
+`low`. An explicit request for the archived model reports current replacements.
+
 Use `wut --benchmark --model groq:openai/gpt-oss-20b` to send three small test
 requests and emit JSON lines with `first_text_ms`, `total_ms`, and `output_chars`.
 Without `--model`, it tries the catalog and reports unavailable credentials or
@@ -65,6 +69,10 @@ failed requests explicitly. Each test request has a 15-second deadline. This
 measures direct inference with streaming, without triage or workspace tools;
 first-text latency includes any model reasoning before visible text. It does
 not equate provider-advertised token throughput with response latency.
+
+A [live run from zero](evals/inference/2026-11-08-zero.json) records the raw
+samples and successful answer/workspace-read checks. Results depend on the
+prompt, reasoning level, network, and provider load.
 
 Model IDs and protocol options were checked against the
 [Groq model catalog](https://console.groq.com/docs/models),

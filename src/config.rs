@@ -296,9 +296,13 @@ impl Config {
             .and_then(Value::as_str)
             .and_then(ResponseColor::parse)
             .ok_or_else(|| invalid_config("config has invalid 'response_color'"))?;
+        let (model, reasoning) = cerebras::migrate_archived_model(
+            optional_string(value, "model")?,
+            optional_string(value, "reasoning")?,
+        );
         Ok(Self {
-            model: normalize_model(optional_string(value, "model")?)?,
-            reasoning: optional_string(value, "reasoning")?,
+            model: normalize_model(model)?,
+            reasoning,
             response_color,
             instructions: Instructions::from_json(value.get("instructions"))?,
         })
@@ -449,5 +453,16 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.message().contains("unknown model"));
+    }
+
+    #[test]
+    fn archived_gemma_defaults_migrate_to_an_available_cerebras_model() {
+        for (old_effort, new_effort) in
+            [(Some("none"), "low"), (None, "low"), (Some("high"), "high")]
+        {
+            let config = load(json!({"version": 4, "response_color": "default", "model": "gemma-4-31b", "reasoning": old_effort})).unwrap();
+            assert_eq!(config.model(), Some("gpt-oss-120b"));
+            assert_eq!(config.reasoning(), Some(new_effort));
+        }
     }
 }

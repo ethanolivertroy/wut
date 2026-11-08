@@ -24,14 +24,6 @@ pub const MODELS: &[Model] = &[
         levels: &["low", "medium", "high"],
     },
     Model {
-        id: "gemma-4-31b",
-        provider: Provider::Cerebras,
-        name: "Gemma 4 31B",
-        description: "Cerebras public endpoint · vision capable",
-        default_reasoning: Some("none"),
-        levels: &["none", "low", "medium", "high"],
-    },
-    Model {
         id: "qwen-3.8-27b",
         provider: Provider::Cerebras,
         name: "Qwen 3.8 27B",
@@ -112,12 +104,33 @@ impl Model {
 }
 
 pub fn require_model(id: &str) -> Result<&'static Model> {
+    if id == "gemma-4-31b" {
+        return Err(Error::new(
+            "Cerebras has archived gemma-4-31b",
+            "choose gpt-oss-120b or qwen-3.8-27b; run 'wut --models' for current choices",
+        ));
+    }
     find_model(id).ok_or_else(|| {
         Error::new(
             format!("unknown model '{id}'"),
             "run 'wut --models' to list model IDs",
         )
     })
+}
+
+/// Keep old defaults and chats usable on the same provider, translating
+/// Gemma's unsupported `none` effort to the replacement's lowest effort.
+pub fn migrate_archived_model(
+    model: Option<String>,
+    reasoning: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if model.as_deref() != Some("gemma-4-31b") {
+        return (model, reasoning);
+    }
+    let reasoning = reasoning
+        .filter(|level| matches!(level.as_str(), "low" | "medium" | "high" | "auto"))
+        .unwrap_or_else(|| "low".to_owned());
+    (Some(DEFAULT_MODEL.to_owned()), Some(reasoning))
 }
 
 pub fn default_model() -> &'static str {

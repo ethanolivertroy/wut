@@ -38,6 +38,7 @@ class ProviderCliTests(unittest.TestCase):
         self.assertIn("groq:openai/gpt-oss-20b", result.stdout)
         self.assertIn("GROQ_API_KEY", result.stdout)
         self.assertIn("CEREBRAS_API_KEY", result.stdout)
+        self.assertNotIn("gemma-4-31b", result.stdout)
 
     def test_a_cerebras_key_is_never_used_for_groq(self):
         self.environment["CEREBRAS_API_KEY"] = "fake-cerebras-secret"
@@ -85,6 +86,12 @@ class ProviderCliTests(unittest.TestCase):
         result = self.run_cli("--model", "gpt-oss-120b", "hello")
         self.assertIn("no Cerebras API key", result.stderr)
         self.assertEqual(config.read_text(), contents)
+
+    def test_explicit_archived_model_reports_a_local_replacement(self):
+        result = self.run_cli("--model", "gemma-4-31b", "hello")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("archived", result.stderr)
+        self.assertIn("gpt-oss-120b", result.stderr)
 
 
 if __name__ == "__main__":
