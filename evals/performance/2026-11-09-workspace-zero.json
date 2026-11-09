@@ -1,5 +1,4 @@
 {
-  "measured_at_utc": "2026-11-09T00:48:00Z",
   "host": "zero",
   "baseline_commit": "fd81cdb51da0f4ae65020859a6fd4eb9bd951bb3",
   "candidate_branch": "etgohome/stream-workspace-and-bound-json",
@@ -33,5 +32,6 @@
   "order": "Each pair runs eager then lazy; one warmup pair precedes five retained pairs. Cached filesystem state can affect results.",
   "median_eager_ms": 1.368322,
   "median_lazy_ms": 0.240788,
-  "median_speedup": 5.682683522434673
+  "median_speedup": 5.682683522434673,
+  "measured_on_utc": "2026-11-09"
 }
