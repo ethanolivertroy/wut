@@ -348,42 +348,14 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         Some(Glob::compile(&glob, "grep")?)
     };
 
-    let mut lines: Vec<String> = Vec::new();
-    let mut truncated = false;
     let target = if path.is_empty() {
         None
     } else {
         Some(path.as_str())
     };
-    let (targets, stopped) = search_targets(target, root)?;
-    for path in targets {
-        if is_denied(&path) || !path.is_file() {
-            continue;
-        }
-        if glob
-            .as_ref()
-            .is_some_and(|glob| !glob.matches(&file_name(&path)))
-        {
-            continue;
-        }
-        let Ok(bytes) = read_text_file(&path) else {
-            continue;
-        };
-        let content = String::from_utf8_lossy(&bytes);
-        for (index, line) in content.lines().enumerate() {
-            if pattern.is_match(line) {
-                if lines.len() >= MAX_MATCH_LINES {
-                    truncated = true;
-                    break;
-                }
-                let shown: String = line.chars().take(240).collect();
-                lines.push(format!("{}:{}:{}", display(&path, root), index + 1, shown));
-            }
-        }
-        if lines.len() >= MAX_MATCH_LINES {
-            break;
-        }
-    }
+    let mut targets = search_targets(target, root)?;
+    let (lines, truncated) = grep_matches(&mut targets, root, &pattern, glob.as_ref());
+    let stopped = targets.stopped();
     if lines.is_empty() {
         return Ok(if stopped {
             format!("no matches in the first {MAX_WALK_ENTRIES} entries; search a narrower path")
@@ -400,6 +372,37 @@ fn grep(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
         ));
     }
     Ok(output)
+}
+
+fn grep_matches(
+    targets: &mut impl Iterator<Item = PathBuf>,
+    root: &Path,
+    pattern: &regex::Regex,
+    glob: Option<&Glob>,
+) -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    for path in targets {
+        if is_denied(&path) {
+            continue;
+        }
+        if glob.is_some_and(|glob| !glob.matches(&file_name(&path))) {
+            continue;
+        }
+        let Ok(bytes) = read_text_file(&path) else {
+            continue;
+        };
+        let content = String::from_utf8_lossy(&bytes);
+        for (index, line) in content.lines().enumerate() {
+            if pattern.is_match(line) {
+                let shown: String = line.chars().take(240).collect();
+                lines.push(format!("{}:{}:{}", display(&path, root), index + 1, shown));
+                if lines.len() == MAX_MATCH_LINES {
+                    return (lines, true);
+                }
+            }
+        }
+    }
+    (lines, false)
 }
 
 /// Open only regular text files, and bound the actual read as well as the
@@ -492,47 +495,85 @@ fn list(arguments: &serde_json::Map<String, Value>, root: &Path) -> Result<Strin
             format!("'{}' holds secrets and cannot be listed", path.display()),
         ));
     }
-    let entries = std::fs::read_dir(&path).map_err(|error| {
+    list_directory(&path, MAX_WALK_ENTRIES)
+}
+
+fn list_directory(path: &Path, limit: usize) -> Result<String> {
+    let mut entries = std::fs::read_dir(path).map_err(|error| {
         tool_error(
             "ls",
             format!("could not read '{}': {error}", path.display()),
         )
     })?;
-    let mut names: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().is_dir() {
-                format!("{name}/")
-            } else {
-                name
-            }
-        })
-        .collect();
-    names.sort();
-    if names.is_empty() {
-        return Ok("(empty)".to_owned());
+    let mut names = Vec::new();
+    let mut scanned = 0;
+    let mut stopped = false;
+    for entry in entries.by_ref().take(limit) {
+        if crate::cancel::requested() {
+            stopped = true;
+            break;
+        }
+        scanned += 1;
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // read_dir supplies the type on common filesystems. Only symlinks
+        // need an additional stat to preserve directory slash markers.
+        let is_dir = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()));
+        names.push(if is_dir { format!("{name}/") } else { name });
     }
-    Ok(names.join("\n"))
+    stopped = stopped || entries.next().is_some();
+    names.sort();
+    let mut output = if names.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        truncate_output(names.join("\n"))
+    };
+    if stopped {
+        output.push_str(&format!(
+            "\n[stopped after {scanned} entries; list a narrower path]"
+        ));
+    }
+    Ok(output)
 }
 
-/// The files grep searches, and whether the walk hit its entry limit.
-fn search_targets(path: Option<&str>, root: &Path) -> Result<(Vec<PathBuf>, bool)> {
+/// Yield files as grep needs them, so reaching the match limit also stops
+/// directory traversal. Walked symlinks are never search candidates.
+enum SearchTargets {
+    File(Option<PathBuf>),
+    Walk(Walk),
+}
+
+impl SearchTargets {
+    fn stopped(&self) -> bool {
+        matches!(self, Self::Walk(walk) if walk.stopped)
+    }
+}
+
+impl Iterator for SearchTargets {
+    type Item = PathBuf;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::File(path) => path.take(),
+            Self::Walk(walk) => walk
+                .find(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path()),
+        }
+    }
+}
+
+fn search_targets(path: Option<&str>, root: &Path) -> Result<SearchTargets> {
     let path = match path {
         Some(path) => resolve(path, root, "grep")?,
         None => root.to_owned(),
     };
     if path.is_file() {
-        return Ok((vec![path], false));
+        return Ok(SearchTargets::File(Some(path)));
     }
     // Only regular files: a symlink found while walking could point anywhere.
-    let mut walk = walk(&path);
-    let files = walk
-        .by_ref()
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect();
-    Ok((files, walk.stopped))
+    Ok(SearchTargets::Walk(walk(&path)))
 }
 
 /// Walks `start` without following symlinks, skipping secret and generated
@@ -1150,6 +1191,123 @@ mod tests {
         let mut walk = walk_limited(&workspace, 100);
         assert_eq!(walk.by_ref().count(), 3);
         assert!(!walk.stopped);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn grep_stops_requesting_files_at_its_match_limit() {
+        let (base, workspace) = sandbox();
+        let path = workspace.join("many.txt");
+        std::fs::write(&path, "needle\n".repeat(super::MAX_MATCH_LINES + 1)).unwrap();
+        let mut first = Some(path);
+        let mut targets = std::iter::from_fn(|| {
+            Some(
+                first
+                    .take()
+                    .expect("grep requested a file after reaching its match limit"),
+            )
+        });
+        let (lines, stopped) = super::grep_matches(
+            &mut targets,
+            &workspace,
+            &regex::Regex::new("needle").unwrap(),
+            None,
+        );
+        assert!(stopped);
+        assert_eq!(lines.len(), super::MAX_MATCH_LINES);
+        assert!(
+            run(
+                "grep",
+                json!({"pattern": "needle", "path": "many.txt"}),
+                &workspace
+            )
+            .unwrap()
+            .ends_with("[stopped at 200 matching lines]")
+        );
+        let targets = super::search_targets(None, &workspace).unwrap();
+        assert!(matches!(targets, super::SearchTargets::Walk(walk) if walk.seen == 0));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn listings_bound_entries_and_keep_directory_markers() {
+        let (base, workspace) = sandbox();
+        for name in ["z.txt", "a.txt", "b.txt", "c.txt", "d.txt"] {
+            std::fs::write(workspace.join(name), "").unwrap();
+        }
+        std::os::unix::fs::symlink(workspace.join("src"), workspace.join("linked")).unwrap();
+        let output = super::list_directory(&workspace, 3).unwrap();
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[3], "[stopped after 3 entries; list a narrower path]");
+        assert!(lines[..3].windows(2).all(|pair| pair[0] <= pair[1]));
+        let complete = run("ls", json!({}), &workspace).unwrap();
+        assert!(complete.lines().any(|line| line == "src/"));
+        assert!(complete.lines().any(|line| line == "linked/"));
+        assert!(!complete.contains("[stopped"));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn listings_truncate_large_unicode_output_safely() {
+        let (base, workspace) = sandbox();
+        for index in 0..200 {
+            let name = format!("{index:03}-{}", "é".repeat(100));
+            std::fs::write(workspace.join(name), "").unwrap();
+        }
+        let output = run("ls", json!({}), &workspace).unwrap();
+        assert!(output.ends_with("\n[truncated]"));
+        assert!(output.len() <= super::MAX_OUTPUT_CHARS + "\n[truncated]".len());
+        assert!(!output.contains('\u{fffd}'));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[ignore = "synthetic filesystem benchmark; run explicitly in release mode"]
+    fn benchmark_early_grep() {
+        use std::time::Instant;
+
+        let (base, workspace) = sandbox();
+        std::fs::remove_dir_all(workspace.join("src")).unwrap();
+        let contents = "needle\n".repeat(super::MAX_MATCH_LINES + 1);
+        for index in 0..4_000 {
+            std::fs::write(workspace.join(format!("file-{index:04}.txt")), &contents).unwrap();
+        }
+        let pattern = regex::Regex::new("needle").unwrap();
+        // Both paths use the same bounded scanner. Only traversal setup differs.
+        // Fixture creation and regex compilation are outside the measurement.
+        let mut eager_ms = Vec::new();
+        let mut lazy_ms = Vec::new();
+        for sample in 0..6 {
+            let started = Instant::now();
+            let files: Vec<_> = super::walk(&workspace)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path())
+                .collect();
+            let eager = super::grep_matches(&mut files.into_iter(), &workspace, &pattern, None);
+            let eager_elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let started = Instant::now();
+            let mut targets = super::search_targets(None, &workspace).unwrap();
+            let lazy = super::grep_matches(&mut targets, &workspace, &pattern, None);
+            let lazy_elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(eager, lazy);
+            assert!(lazy.1);
+            if sample > 0 {
+                eager_ms.push(eager_elapsed);
+                lazy_ms.push(lazy_elapsed);
+            }
+        }
+        println!(
+            "{}",
+            json!({
+                "fixture_files": 4000,
+                "matches_per_file": super::MAX_MATCH_LINES + 1,
+                "match_limit": super::MAX_MATCH_LINES,
+                "warmup_pairs": 1,
+                "eager_ms": eager_ms,
+                "lazy_ms": lazy_ms,
+            })
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

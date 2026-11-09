@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::{storage, upgrade};
 
 const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const MAX_CACHE_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Cache {
@@ -135,7 +136,7 @@ fn cache_path_from(xdg_cache_home: Option<OsString>, home: Option<OsString>) -> 
 }
 
 fn read_cache(path: &Path) -> Option<Cache> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = storage::read_bounded(path, MAX_CACHE_BYTES).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     Some(Cache {
         checked_at: value.get("checked_at")?.as_u64()?,
@@ -160,7 +161,7 @@ fn write_cache(path: &Path, cache: &Cache) -> Result<()> {
     });
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| Error::internal(format!("could not encode update cache: {error}")))?;
-    storage::write_private(path, &bytes, "update cache")
+    storage::write_private(path, &bytes, "update cache", MAX_CACHE_BYTES)
 }
 
 fn now() -> u64 {

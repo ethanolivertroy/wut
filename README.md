@@ -47,6 +47,12 @@ Provider streams are limited to 1 MiB per line, 16 MiB per response, and 128
 tool-call slots. Over-limit or invalid streams fail without saving a completed
 turn. Diagnostics show terminal control characters as visible escape text.
 
+Local JSON reads accept regular files, including symlinks to regular files,
+and reject pipes or devices without waiting for data. Size limits are 1 MiB for
+config, 64 MiB per saved session, and 8 KiB for the update cache. Oversized saves
+fail without replacing previously saved data. Unreadable sessions are skipped
+with a warning so the remaining history stays accessible.
+
 For Groq, set `GROQ_API_KEY` in the process environment. Groq never uses your
 Cerebras key or its saved credentials file. Choose a model in `wut --settings`,
 or pass its ID before a question:
@@ -95,6 +101,9 @@ files or directories.
 Glob patterns for `find` and the `grep` file filter are compiled once per search
 and limited to 512 bytes. `*` stays within one path component. Repeated wildcards
 use a non-backtracking matcher instead of recursively trying every combination.
+`grep` walks files as needed and stops at 200 matching lines. Workspace walks
+and directory listings scan at most 20,000 entries; listings and text results
+are truncated to 32 KiB plus a limit notice.
 
 Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
 Jev model triage each question before it reaches Cerebras. One fast System One

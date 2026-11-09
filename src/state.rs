@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use crate::error::{Error, Result};
 use crate::storage;
 
+const MAX_SESSION_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct Session {
     pub agent: String,
@@ -138,7 +140,7 @@ pub fn save(session: &Session) -> Result<()> {
 fn save_to(directory: &Path, session: &Session) -> Result<()> {
     let destination = session_path(directory, session)?;
     let bytes = session_bytes(session)?;
-    storage::write_private(&destination, &bytes, "session")
+    storage::write_private(&destination, &bytes, "session", MAX_SESSION_BYTES)
 }
 
 fn session_path(directory: &Path, session: &Session) -> Result<PathBuf> {
@@ -281,10 +283,10 @@ fn session_entries(directory: &Path) -> Result<Vec<fs::DirEntry>> {
 }
 
 fn load_session(path: &Path) -> Result<Session> {
-    let bytes = fs::read(path).map_err(|error| {
+    let bytes = storage::read_bounded(path, MAX_SESSION_BYTES).map_err(|error| {
         Error::new(
             format!("could not read '{}': {error}", path.display()),
-            "check its permissions and try again",
+            "check the file type, size and permissions, then try again",
         )
     })?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
@@ -383,6 +385,10 @@ mod tests {
         save_to(&directory, &session).unwrap();
         std::fs::write(directory.join("broken.json"), "{not json").unwrap();
         std::fs::write(directory.join("empty.json"), "").unwrap();
+        std::fs::File::create(directory.join("oversized.json"))
+            .unwrap()
+            .set_len(super::MAX_SESSION_BYTES as u64 + 1)
+            .unwrap();
 
         let sessions = load_from(&directory).unwrap();
         assert_eq!(sessions.len(), 1);
