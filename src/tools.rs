@@ -702,7 +702,11 @@ pub fn is_denied(path: &Path) -> bool {
         return true;
     }
     let name = file_name(path).to_lowercase();
-    if SECRET_DIRS.contains(&name.as_str()) || SECRET_FILES.contains(&name.as_str()) {
+    if SECRET_DIRS.contains(&name.as_str())
+        || SECRET_FILES.contains(&name.as_str())
+        || name.starts_with(".credentials.")
+        || name.starts_with("credentials.tmp.")
+    {
         return true;
     }
     if name == ".env" || name.starts_with(".env.") {
@@ -1123,6 +1127,10 @@ mod tests {
             ".npmrc",
             ".netrc",
             "home/.config/wut/credentials",
+            "home/.config/wut/groq/credentials",
+            "home/.config/wut/ai-gateway/credentials",
+            "home/.config/wut/ai-gateway/.credentials.123.456.tmp",
+            "home/.config/wut/credentials.tmp.123",
             ".aws/config",
             "x/.SSH/known_hosts",
             ".ssh",

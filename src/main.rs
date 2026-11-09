@@ -5,6 +5,7 @@ mod cerebras;
 mod cli;
 mod clock;
 mod config;
+mod credentials;
 mod diagram;
 mod error;
 mod instructions;
@@ -103,6 +104,7 @@ fn run() -> Result<()> {
             }
             cli::Mode::Sessions => sessions(),
             cli::Mode::Settings => standalone_settings(),
+            cli::Mode::SetKey(provider) => credentials::run(provider),
         }
     })();
     let notice = update_check.notice();
@@ -129,6 +131,7 @@ fn update_checks_enabled(mode: &cli::Mode) -> bool {
                 | cli::Mode::UpdateCheck
                 | cli::Mode::Models
                 | cli::Mode::Benchmark
+                | cli::Mode::SetKey(_)
         )
 }
 
@@ -224,6 +227,11 @@ impl Question {
             prompt: format!("{question}\n\n{fence}\n{}\n{fence}", input.trim_end()),
             saved: format!("{question} [+{} of piped input]", byte_count(input.len())),
         }
+    }
+
+    fn reasoning_to_save<'a>(&self, reasoning: Option<&'a str>) -> Option<&'a str> {
+        // Reasoning can quote piped input, which session history omits.
+        reasoning.filter(|_| self.prompt == self.saved)
     }
 }
 
@@ -339,7 +347,14 @@ fn run_one_shot(
         decorate,
         settings.response_color,
     )?;
-    record_turn(&mut saved, settings, &cwd, &question.saved, answer)?;
+    record_turn(
+        &mut saved,
+        settings,
+        &cwd,
+        &question.saved,
+        answer,
+        question.reasoning_to_save(agent.last_reasoning()),
+    )?;
     Ok(())
 }
 
@@ -381,7 +396,14 @@ fn run_interactive(
             decorate,
             settings.response_color,
         )?;
-        return record_turn(&mut saved, &settings, &cwd, &question.saved, answer);
+        return record_turn(
+            &mut saved,
+            &settings,
+            &cwd,
+            &question.saved,
+            answer,
+            question.reasoning_to_save(agent.last_reasoning()),
+        );
     }
 
     cancel::install();
@@ -427,7 +449,14 @@ fn run_interactive(
         if decorate {
             eprintln!();
         }
-        record_turn(&mut saved, &settings, &cwd, question, answer)?;
+        record_turn(
+            &mut saved,
+            &settings,
+            &cwd,
+            question,
+            answer,
+            agent.last_reasoning(),
+        )?;
     }
 
     Ok(())
@@ -550,11 +579,15 @@ fn record_turn(
     cwd: &std::path::Path,
     question: &str,
     answer: String,
+    reasoning: Option<&str>,
 ) -> Result<()> {
-    let stored =
-        saved.get_or_insert_with(|| state::Session::new("cerebras", new_session_id(), cwd));
+    let stored = saved.get_or_insert_with(|| {
+        let provider = cerebras::find_model(cerebras::resolve_model(settings.model.as_deref()))
+            .map_or(cerebras::Provider::Cerebras, |model| model.provider);
+        state::Session::new(provider.id(), new_session_id(), cwd)
+    });
     stored.settings = Some(session_settings(settings));
-    stored.add_turn(question, answer);
+    stored.add_turn(question, answer, reasoning.map(str::to_owned));
     state::save(stored)
 }
 
@@ -800,6 +833,11 @@ mod tests {
         assert_eq!(
             question.saved,
             "why did this fail? [+12 bytes of piped input]"
+        );
+        assert_eq!(question.reasoning_to_save(Some("error: boom")), None);
+        assert_eq!(
+            Question::plain("why?").reasoning_to_save(Some("thinking")),
+            Some("thinking")
         );
 
         let fenced = Question::with_context("explain".to_owned(), "```rust\nfn x() {}\n```");

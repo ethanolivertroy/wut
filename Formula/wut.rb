@@ -1,5 +1,5 @@
 class Wut < Formula
-  desc "Tiny, fast terminal assistant powered by Cerebras or Groq"
+  desc "Tiny, fast terminal assistant"
   homepage "https://github.com/ethanolivertroy/wut"
   version "0.0.5"
   license "MIT"
@@ -38,16 +38,20 @@ class Wut < Formula
 
   def caveats
     <<~EOS
-      Set a provider API key in your process environment:
-        export CEREBRAS_API_KEY=...
-      Or use Groq:
-        export GROQ_API_KEY=...
+      Save a provider key with hidden terminal input:
+        wut --set-key cerebras
+        wut --set-key groq
+        wut --set-key ai-gateway
+      Run wut --set-key to choose a provider. Do not pass the key as an argument.
+
+      Choose a model in wut --settings, or pass its ID:
         wut --model groq:openai/gpt-oss-20b "your question"
 
-      Optional Cerebras storage is plaintext, not encrypted:
-        mkdir -p ~/.config/wut && chmod 700 ~/.config/wut
-        printf '%s\\n' YOUR_KEY > ~/.config/wut/credentials
-        chmod 600 ~/.config/wut/credentials
+      Saved keys are plaintext, not encrypted or stored in an OS keychain.
+      Key files use owner-only permissions (0600), in private directories (0700).
+      Loading rejects unsafe permissions/ownership, symlinks, hard links, and
+      macOS extended ACLs. CEREBRAS_API_KEY, GROQ_API_KEY, and AI_GATEWAY_API_KEY
+      environment variables override saved credentials for their provider.
 
       Optional web search: export EXA_API_KEY=...
 

@@ -15,7 +15,6 @@ const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOOL_CALLS: usize = 128;
 const DEFAULT_MODEL: &str = "gpt-oss-120b";
 const ENV_KEY: &str = "CEREBRAS_API_KEY";
-const CREDENTIALS_FILE: &str = "wut/credentials";
 
 pub const MODELS: &[Model] = &[
     Model {
@@ -50,12 +49,29 @@ pub const MODELS: &[Model] = &[
         default_reasoning: Some("low"),
         levels: &["low", "medium", "high"],
     },
+    Model {
+        id: "deepseek/deepseek-v4.1-flash-1017-fast",
+        name: "DeepSeek V4.1 Flash 1017 Fast",
+        description: "Vercel AI Gateway · Baseten · needs AI_GATEWAY_API_KEY",
+        provider: Provider::AiGateway,
+        default_reasoning: Some("none"),
+        levels: &["none", "low", "medium", "high"],
+    },
+    Model {
+        id: "deepseek/deepseek-v4.1-flash-1017-ultrafast",
+        name: "DeepSeek V4.1 Flash 1017 Ultrafast",
+        description: "Vercel AI Gateway · Fireworks · needs AI_GATEWAY_API_KEY",
+        provider: Provider::AiGateway,
+        default_reasoning: Some("none"),
+        levels: &["none", "low", "high", "max"],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Provider {
     Cerebras,
     Groq,
+    AiGateway,
 }
 
 impl Provider {
@@ -63,6 +79,23 @@ impl Provider {
         match self {
             Self::Cerebras => "Cerebras",
             Self::Groq => "Groq",
+            Self::AiGateway => "Vercel AI Gateway",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Cerebras => "cerebras",
+            Self::Groq => "groq",
+            Self::AiGateway => "ai-gateway",
+        }
+    }
+
+    pub(crate) fn credentials_file(self) -> &'static str {
+        match self {
+            Self::Cerebras => "wut/credentials",
+            Self::Groq => "wut/groq/credentials",
+            Self::AiGateway => "wut/ai-gateway/credentials",
         }
     }
 
@@ -70,6 +103,7 @@ impl Provider {
         match self {
             Self::Cerebras => ENV_KEY,
             Self::Groq => "GROQ_API_KEY",
+            Self::AiGateway => "AI_GATEWAY_API_KEY",
         }
     }
 
@@ -77,6 +111,7 @@ impl Provider {
         match self {
             Self::Cerebras => DEFAULT_BASE_URL,
             Self::Groq => "https://api.groq.com/openai/v1",
+            Self::AiGateway => "https://ai-gateway.vercel.sh/v1",
         }
     }
 }
@@ -157,6 +192,8 @@ pub struct Message {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+    /// Kept for Gateway tool rounds, never displayed as answer text.
+    pub reasoning: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +222,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            reasoning: None,
         }
     }
 
@@ -194,10 +232,11 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            reasoning: None,
         }
     }
 
-    fn to_json(&self) -> Value {
+    fn to_json(&self, provider: Provider) -> Value {
         let mut value = json!({
             "role": self.role.as_str(),
             "content": if self.content.is_empty() && !self.tool_calls.is_empty() {
@@ -223,6 +262,11 @@ impl Message {
         }
         if let Some(id) = &self.tool_call_id {
             value["tool_call_id"] = Value::String(id.clone());
+        }
+        if provider == Provider::AiGateway && self.role == Role::Assistant {
+            // Gateway converts this normalized field to DeepSeek reasoning_content.
+            // Empty values also handle history from non-thinking models.
+            value["reasoning"] = json!(self.reasoning.as_deref().unwrap_or_default());
         }
         value
     }
@@ -277,12 +321,14 @@ impl Tool {
 pub struct Outcome {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    pub reasoning: Option<String>,
 }
 
 pub struct Client {
     api_key: String,
     base_url: String,
     provider: Provider,
+    proxy_from_env: bool,
     // Keep the agent's connection pool for tool rounds and chat follow-ups.
     http: ureq::Agent,
 }
@@ -299,7 +345,8 @@ impl Client {
             api_key: "test".to_owned(),
             base_url: base_url.to_owned(),
             provider,
-            http: http_agent(),
+            proxy_from_env: false,
+            http: http_agent(false),
         }
     }
 
@@ -309,12 +356,13 @@ impl Client {
             api_key: auth_key(provider)?,
             base_url: provider.base_url().to_owned(),
             provider,
-            http: http_agent(),
+            proxy_from_env: true,
+            http: http_agent(true),
         })
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.http = http_agent_with_timeout(Some(timeout));
+        self.http = http_agent_with_timeout(Some(timeout), self.proxy_from_env);
         self
     }
 
@@ -396,7 +444,11 @@ impl Client {
         }
 
         let stream = EventStream::new(BufReader::new(response.into_reader()));
-        collect_stream(stream, on_delta)
+        let mut outcome = collect_stream(stream, on_delta)?;
+        if self.provider != Provider::AiGateway {
+            outcome.reasoning = None;
+        }
+        Ok(outcome)
     }
 }
 
@@ -407,12 +459,13 @@ fn json_format_error() -> Error {
     )
 }
 
-fn http_agent() -> ureq::Agent {
-    http_agent_with_timeout(None)
+fn http_agent(proxy_from_env: bool) -> ureq::Agent {
+    http_agent_with_timeout(None, proxy_from_env)
 }
 
-fn http_agent_with_timeout(timeout: Option<Duration>) -> ureq::Agent {
+fn http_agent_with_timeout(timeout: Option<Duration>, proxy_from_env: bool) -> ureq::Agent {
     let builder = ureq::AgentBuilder::new()
+        .try_proxy_from_env(proxy_from_env)
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT);
     match timeout {
@@ -433,9 +486,10 @@ pub fn request_body(
         Some(model) => model.api_id(),
         None => model,
     };
+    let provider = selected.map_or(Provider::Cerebras, |model| model.provider);
     let mut body = json!({
         "model": api_model,
-        "messages": messages.iter().map(Message::to_json).collect::<Vec<_>>(),
+        "messages": messages.iter().map(|message| message.to_json(provider)).collect::<Vec<_>>(),
         "stream": true,
     });
     if !tools.is_empty() {
@@ -456,6 +510,7 @@ fn collect_stream(
 ) -> Result<Outcome> {
     let mut content = String::new();
     let mut calls: Vec<Option<ToolCall>> = Vec::new();
+    let mut reasoning = None::<String>;
     while let Some(event) = stream.next()? {
         if let Some(message) = event.error {
             return Err(Error::new(
@@ -466,6 +521,9 @@ fn collect_stream(
         if let Some(text) = event.content {
             content.push_str(&text);
             on_delta(&text)?;
+        }
+        if let Some(text) = event.reasoning {
+            reasoning.get_or_insert_with(String::new).push_str(&text);
         }
         for fragment in event.tool_calls {
             let index = fragment.index;
@@ -494,6 +552,7 @@ fn collect_stream(
     Ok(Outcome {
         content,
         tool_calls: calls.into_iter().flatten().collect(),
+        reasoning,
     })
 }
 
@@ -508,6 +567,7 @@ struct Fragment {
 #[derive(Debug, Default)]
 struct Event {
     content: Option<String>,
+    reasoning: Option<String>,
     error: Option<String>,
     tool_calls: Vec<Fragment>,
 }
@@ -534,6 +594,11 @@ fn decode_event(data: &str) -> Result<Option<Event>> {
         .as_str()
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
+    let reasoning = choice["delta"]["reasoning"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .or_else(|| choice["delta"]["reasoning_content"].as_str())
+        .map(str::to_owned);
     let mut tool_calls = Vec::new();
     if let Some(values) = choice["delta"]["tool_calls"].as_array() {
         if values.len() > MAX_TOOL_CALLS {
@@ -555,11 +620,12 @@ fn decode_event(data: &str) -> Result<Option<Event>> {
             });
         }
     }
-    if content.is_none() && tool_calls.is_empty() {
+    if content.is_none() && reasoning.is_none() && tool_calls.is_empty() {
         return Ok(None);
     }
     Ok(Some(Event {
         content,
+        reasoning,
         tool_calls,
         ..Event::default()
     }))
@@ -666,114 +732,36 @@ fn tool_call_limit_error() -> Error {
 }
 
 fn auth_key(provider: Provider) -> Result<String> {
-    let env_key = provider.env_key();
-    if let Some(key) = std::env::var_os(env_key)
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(key.trim().to_owned());
+    auth_key_from(
+        provider,
+        std::env::var_os(provider.env_key()).map(|value| value.to_string_lossy().into_owned()),
+        || crate::credentials::load(provider),
+    )
+}
+
+fn auth_key_from(
+    provider: Provider,
+    environment: Option<String>,
+    saved: impl FnOnce() -> Result<Option<String>>,
+) -> Result<String> {
+    if let Some(key) = environment.filter(|value| !value.trim().is_empty()) {
+        return Ok(crate::credentials::validate(&key)?.to_owned());
     }
-    if provider == Provider::Cerebras
-        && let Some(key) = key_from_credentials_file()?
-    {
+    if let Some(key) = saved()? {
         return Ok(key);
     }
     Err(Error::new(
-        format!("no {} API key found (set ${env_key})", provider.name()),
-        if provider == Provider::Cerebras {
-            "rerun install.sh from a terminal to save one, or set CEREBRAS_API_KEY".to_owned()
-        } else {
-            format!(
-                "set {env_key} in the environment; credentials from another provider are never used"
-            )
-        },
+        format!(
+            "no {} API key found (set ${})",
+            provider.name(),
+            provider.env_key()
+        ),
+        format!(
+            "set {}, or save a key to ~/.config/{} (under $XDG_CONFIG_HOME when set)",
+            provider.env_key(),
+            provider.credentials_file()
+        ),
     ))
-}
-
-fn key_from_credentials_file() -> Result<Option<String>> {
-    let path = if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(config_home)
-    } else {
-        let Some(home) = std::env::var_os("HOME") else {
-            return Ok(None);
-        };
-        std::path::PathBuf::from(home).join(".config")
-    }
-    .join(CREDENTIALS_FILE);
-    read_credentials(&path)
-}
-
-fn read_credentials(path: &std::path::Path) -> Result<Option<String>> {
-    use std::fs::{File, OpenOptions};
-    use std::io::{ErrorKind, Read};
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-
-    let invalid = || {
-        Error::new(
-            format!(
-                "refusing unsafe or unreadable credentials '{}'",
-                path.display()
-            ),
-            "use an owner-only directory (chmod 700) and a regular credentials file (chmod 600), owned by you with no symlinks or hard links; or set CEREBRAS_API_KEY",
-        )
-    };
-    let Some(parent) = path.parent() else {
-        return Err(invalid());
-    };
-    let directory = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(parent)
-    {
-        Ok(directory) => directory,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(invalid()),
-    };
-    // Pin the directory before opening its entry, so a renamed directory
-    // cannot swap in a different credentials file after these checks.
-    let metadata = directory.metadata().map_err(|_| invalid())?;
-    // SAFETY: geteuid has no arguments or memory requirements.
-    let uid = unsafe { libc::geteuid() };
-    if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-        return Err(invalid());
-    }
-    // SAFETY: the directory descriptor and static, NUL-terminated filename
-    // remain valid for the call. O_NONBLOCK prevents a FIFO from hanging us.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            c"credentials".as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return if std::io::Error::last_os_error().kind() == ErrorKind::NotFound {
-            Ok(None)
-        } else {
-            Err(invalid())
-        };
-    }
-    // SAFETY: openat returned a fresh descriptor that this File now owns.
-    let file = unsafe { File::from_raw_fd(fd) };
-    let metadata = file.metadata().map_err(|_| invalid())?;
-    if !metadata.is_file()
-        || metadata.uid() != uid
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-        || metadata.len() > 4096
-    {
-        return Err(invalid());
-    }
-    let mut key = String::new();
-    file.take(4097)
-        .read_to_string(&mut key)
-        .map_err(|_| invalid())?;
-    if key.len() > 4096 {
-        return Err(invalid());
-    }
-    let key = key.trim();
-    Ok((!key.is_empty()).then(|| key.to_owned()))
 }
 
 fn api_error(error: ureq::Error) -> Error {
@@ -805,6 +793,9 @@ fn api_status_error(status: u16, body: &str) -> Error {
         })
         .unwrap_or_else(|| body.trim().to_owned());
     let help = match status {
+        403 if detail.contains("Free tier users do not have access to this model") => {
+            "add paid credits to your Vercel AI Gateway account, then try again"
+        }
         401 | 403 => "check your API key and try again",
         429 => "you hit a rate limit; wait a moment and try again",
         400..=499 => "check the request and try again",
@@ -820,7 +811,9 @@ fn api_status_error(status: u16, body: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventStream, api_status_error, collect_stream};
+    use super::{
+        EventStream, Message, Provider, Role, api_status_error, collect_stream, request_body,
+    };
     use crate::error::Result;
 
     #[test]
@@ -1092,131 +1085,73 @@ mod tests {
         server.join().unwrap();
     }
 
-    struct CredentialsFixture(std::path::PathBuf);
-
-    impl CredentialsFixture {
-        fn new() -> Self {
-            use std::os::unix::fs::DirBuilderExt;
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "wut-credentials-test-{}-{nonce}",
-                std::process::id()
-            ));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .unwrap();
-            Self(path)
-        }
-
-        fn write(&self, contents: &[u8], mode: u32) -> std::path::PathBuf {
-            use std::os::unix::fs::PermissionsExt;
-            let path = self.0.join("credentials");
-            std::fs::write(&path, contents).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            path
-        }
-    }
-
-    impl Drop for CredentialsFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+    #[test]
+    fn environment_keys_take_precedence_without_reading_saved_files() {
+        for provider in [Provider::Cerebras, Provider::Groq, Provider::AiGateway] {
+            assert_eq!(
+                super::auth_key_from(provider, Some("  environment-key  ".to_owned()), || {
+                    panic!("a saved file must not be read when an environment key is set")
+                })
+                .unwrap(),
+                "environment-key"
+            );
+            assert_eq!(
+                super::auth_key_from(provider, Some(" \n".to_owned()), || Ok(Some(
+                    "saved-key".to_owned()
+                )))
+                .unwrap(),
+                "saved-key"
+            );
+            let error =
+                super::auth_key_from(provider, Some("hidden-key\ninjected".to_owned()), || {
+                    panic!("invalid nonempty environment key must fail")
+                })
+                .unwrap_err();
+            assert!(!error.to_string().contains("hidden-key"));
         }
     }
 
     #[test]
-    fn private_credentials_load_and_missing_or_empty_credentials_do_not() {
-        let fixture = CredentialsFixture::new();
-        assert_eq!(
-            super::read_credentials(&fixture.0.join("credentials")).unwrap(),
-            None
+    fn gateway_reasoning_is_kept_separate_from_visible_text() {
+        let (outcome, streamed) = collect(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"Check \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"the files.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Here is the answer.\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let outcome = outcome.unwrap();
+        assert_eq!(streamed, "Here is the answer.");
+        assert_eq!(outcome.reasoning.as_deref(), Some("Check the files."));
+    }
+
+    #[test]
+    fn reasoning_replay_uses_gateway_fields_without_changing_cerebras_requests() {
+        let mut assistant = Message::text(Role::Assistant, "answer");
+        assistant.reasoning = Some("prior thinking".to_owned());
+        let messages = [
+            Message::text(Role::User, "question"),
+            assistant,
+            Message::text(Role::Assistant, "older answer without thinking"),
+        ];
+        let gateway = request_body(
+            &messages,
+            &[],
+            "deepseek/deepseek-v4.1-flash-1017-ultrafast",
+            Some("max"),
         );
-        let path = fixture.write(b"  test-secret\n", 0o600);
-        assert_eq!(
-            super::read_credentials(&path).unwrap().as_deref(),
-            Some("test-secret")
+        assert_eq!(gateway["reasoning_effort"], "max");
+        assert_eq!(gateway["messages"][1]["reasoning"], "prior thinking");
+        assert_eq!(gateway["messages"][2]["reasoning"], "");
+        assert!(gateway["messages"][0].get("reasoning").is_none());
+
+        let cerebras = request_body(&messages, &[], "gpt-oss-120b", Some("low"));
+        assert!(cerebras["messages"][1].get("reasoning").is_none());
+        assert_eq!(cerebras["reasoning_effort"], "low");
+        assert_ne!(Provider::Cerebras.env_key(), Provider::AiGateway.env_key());
+        assert_ne!(
+            Provider::Cerebras.credentials_file(),
+            Provider::AiGateway.credentials_file()
         );
-        fixture.write(b" \n", 0o600);
-        assert_eq!(super::read_credentials(&path).unwrap(), None);
-    }
-
-    #[test]
-    fn credentials_require_private_file_and_directory_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let fixture = CredentialsFixture::new();
-        for mode in [0o644, 0o640, 0o620, 0o604] {
-            let path = fixture.write(b"test-secret", mode);
-            let error = super::read_credentials(&path).unwrap_err();
-            assert!(!error.to_string().contains("test-secret"));
-        }
-        let path = fixture.write(b"test-secret", 0o600);
-        for mode in [0o755, 0o750, 0o720] {
-            std::fs::set_permissions(&fixture.0, std::fs::Permissions::from_mode(mode)).unwrap();
-            assert!(super::read_credentials(&path).is_err());
-        }
-    }
-
-    #[test]
-    fn credentials_reject_symlinks_and_hard_links() {
-        use std::os::unix::fs::symlink;
-        let fixture = CredentialsFixture::new();
-        let target = fixture.write(b"test-secret", 0o600);
-        let alias = fixture.0.join("alias");
-        symlink(&fixture.0, &alias).unwrap();
-        assert!(super::read_credentials(&alias.join("credentials")).is_err());
-        std::fs::rename(&target, fixture.0.join("original")).unwrap();
-        symlink("original", &target).unwrap();
-        assert!(super::read_credentials(&target).is_err());
-        std::fs::remove_file(&target).unwrap();
-        std::fs::hard_link(fixture.0.join("original"), &target).unwrap();
-        assert!(super::read_credentials(&target).is_err());
-    }
-
-    #[test]
-    fn credentials_reject_directories_and_fifos_without_blocking() {
-        use std::os::unix::ffi::OsStrExt;
-        let fixture = CredentialsFixture::new();
-        let path = fixture.0.join("credentials");
-        std::fs::create_dir(&path).unwrap();
-        assert!(super::read_credentials(&path).is_err());
-        std::fs::remove_dir(&path).unwrap();
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: name is a valid NUL-terminated path in our private test directory.
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(super::read_credentials(&path).is_err());
-    }
-
-    #[test]
-    fn credentials_reject_oversized_and_non_utf8_files() {
-        let fixture = CredentialsFixture::new();
-        for bytes in [vec![b'x'; 4097], vec![0xff]] {
-            let path = fixture.write(&bytes, 0o600);
-            assert!(super::read_credentials(&path).is_err());
-        }
-    }
-
-    #[test]
-    fn credentials_reject_foreign_ownership() {
-        use std::os::unix::ffi::OsStrExt;
-        let fixture = CredentialsFixture::new();
-        let path = fixture.write(b"test-secret", 0o600);
-        // Only root can construct a file owned by another uid for this test.
-        // SAFETY: geteuid has no arguments or memory requirements.
-        if unsafe { libc::geteuid() } != 0 {
-            return;
-        }
-        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: name is a valid NUL-terminated path to our test file.
-        assert_eq!(unsafe { libc::chown(name.as_ptr(), 1, 1) }, 0);
-        assert!(super::read_credentials(&path).is_err());
-        std::fs::remove_file(&path).unwrap();
-        let name = std::ffi::CString::new(fixture.0.as_os_str().as_bytes()).unwrap();
-        // SAFETY: name is a valid NUL-terminated path to our test directory.
-        assert_eq!(unsafe { libc::chown(name.as_ptr(), 1, 1) }, 0);
-        assert!(super::read_credentials(&path).is_err());
     }
 
     fn collect(body: &str) -> (Result<super::Outcome>, String) {

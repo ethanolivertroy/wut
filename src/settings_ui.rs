@@ -23,7 +23,6 @@ impl Default for Cache {
 }
 
 pub fn run_defaults(config: &mut Config, _cache: &mut Cache) -> Result<()> {
-    let _screen = select::Screen::enter()?;
     defaults_menu(config)
 }
 
@@ -32,11 +31,11 @@ pub fn run_session(
     config: &mut Config,
     _cache: &mut Cache,
 ) -> Result<()> {
-    let _screen = select::Screen::enter()?;
     session_menu(settings, config)
 }
 
 fn defaults_menu(config: &mut Config) -> Result<()> {
+    let mut screen = Some(select::Screen::enter()?);
     let mut selected = 0;
     loop {
         let items = [
@@ -47,6 +46,7 @@ fn defaults_menu(config: &mut Config) -> Result<()> {
             ),
             Item::new("Instructions", instructions_name(config)),
             Item::new("Response background", config.response_color().name()),
+            Item::new("API key", provider_for_model(config.model()).name()),
             Item::new("Done", "Exit settings"),
         ];
         match select::choose(
@@ -62,6 +62,7 @@ fn defaults_menu(config: &mut Config) -> Result<()> {
                     1 => select_reasoning(config)?,
                     2 => select_instructions(config)?,
                     3 => select_response_color(config)?,
+                    4 => set_api_key(config.model(), &mut screen)?,
                     _ => return Ok(()),
                 }
             }
@@ -71,6 +72,7 @@ fn defaults_menu(config: &mut Config) -> Result<()> {
 }
 
 fn session_menu(settings: &mut crate::Settings, config: &mut Config) -> Result<()> {
+    let mut screen = Some(select::Screen::enter()?);
     let mut selected = 0;
     loop {
         let items = [
@@ -81,6 +83,10 @@ fn session_menu(settings: &mut crate::Settings, config: &mut Config) -> Result<(
             ),
             Item::new("Instructions", instructions_name(config)),
             Item::new("Response background", config.response_color().name()),
+            Item::new(
+                "API key",
+                provider_for_model(settings.model.as_deref()).name(),
+            ),
             Item::new("Done", "Return to your session"),
         ];
         match select::choose(
@@ -96,12 +102,30 @@ fn session_menu(settings: &mut crate::Settings, config: &mut Config) -> Result<(
                     1 => select_reasoning(settings)?,
                     2 => select_instructions(config)?,
                     3 => select_response_color(config)?,
+                    4 => set_api_key(settings.model.as_deref(), &mut screen)?,
                     _ => return Ok(()),
                 }
             }
             Choice::Cancelled => return Ok(()),
         }
     }
+}
+
+fn provider_for_model(model: Option<&str>) -> cerebras::Provider {
+    cerebras::find_model(cerebras::resolve_model(model))
+        .map_or(cerebras::Provider::Cerebras, |model| model.provider)
+}
+
+fn set_api_key(model: Option<&str>, screen: &mut Option<select::Screen>) -> Result<()> {
+    // Hidden credential input owns the normal terminal, so restore cooked
+    // mode and leave the alternate screen before handing it control.
+    drop(screen.take());
+    let result = crate::credentials::run(Some(provider_for_model(model)));
+    *screen = Some(select::Screen::enter()?);
+    if let Err(error) = result {
+        show_message("API key", error.message())?;
+    }
+    Ok(())
 }
 
 trait EditableSettings {
@@ -232,14 +256,20 @@ fn select_model(settings: &mut impl EditableSettings) -> Result<()> {
         .model()
         .and_then(|current| models.iter().position(|model| model.id == current))
         .unwrap_or(0);
-    let Choice::Selected(index) =
-        select::choose("Model", "Cerebras and Groq models", &items, selected)?
+    let Choice::Selected(index) = select::choose(
+        "Model",
+        "Cerebras, Groq, and Vercel AI Gateway",
+        &items,
+        selected,
+    )?
     else {
         return Ok(());
     };
     let model = &models[index];
+    let entering_gateway = model.provider == cerebras::Provider::AiGateway
+        && provider_for_model(settings.model()) != model.provider;
     settings.set_model(Some(model.id.to_owned()));
-    if !supports_reasoning(model, settings.reasoning()) {
+    if entering_gateway || !supports_reasoning(model, settings.reasoning()) {
         settings.set_reasoning(model.default_reasoning.map(str::to_owned));
     }
     settings.save()
@@ -310,6 +340,7 @@ fn reasoning_description(level: &str) -> String {
         "low" => "Low reasoning".to_owned(),
         "medium" => "Balanced reasoning".to_owned(),
         "high" => "Deep reasoning".to_owned(),
+        "max" => "Maximum reasoning".to_owned(),
         AUTO_REASONING => format!(
             "TypeSafe Jev picks a level per question (needs {})",
             typesafe::ENV_KEY
@@ -347,6 +378,43 @@ fn show_message(title: &str, message: &str) -> Result<()> {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         ) {
             return Ok(());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_for_model, reasoning_options, supports_reasoning};
+    use crate::cerebras::{self, Provider};
+    use crate::triage::AUTO_REASONING;
+
+    #[test]
+    fn key_entry_uses_the_selected_models_provider() {
+        assert_eq!(provider_for_model(None), Provider::Cerebras);
+        assert_eq!(
+            provider_for_model(Some("groq:openai/gpt-oss-20b")),
+            Provider::Groq
+        );
+        assert_eq!(
+            provider_for_model(Some("deepseek/deepseek-v4.1-flash-1017-fast")),
+            Provider::AiGateway
+        );
+    }
+
+    #[test]
+    fn gateway_models_offer_their_supported_reasoning_levels() {
+        let fast = cerebras::find_model("deepseek/deepseek-v4.1-flash-1017-fast").unwrap();
+        let ultrafast =
+            cerebras::find_model("deepseek/deepseek-v4.1-flash-1017-ultrafast").unwrap();
+
+        assert!(supports_reasoning(fast, Some("medium")));
+        assert!(!supports_reasoning(fast, Some("max")));
+        assert!(!supports_reasoning(ultrafast, Some("medium")));
+        assert!(supports_reasoning(ultrafast, Some("max")));
+        for model in [fast, ultrafast] {
+            assert!(supports_reasoning(model, model.default_reasoning));
+            assert!(supports_reasoning(model, Some(AUTO_REASONING)));
+            assert_eq!(reasoning_options(model).last(), Some(&AUTO_REASONING));
         }
     }
 }

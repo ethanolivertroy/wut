@@ -397,6 +397,25 @@ mod tests {
     }
 
     #[test]
+    fn gateway_models_and_reasoning_round_trip_without_a_config_migration() {
+        for (model, reasoning) in [
+            ("deepseek/deepseek-v4.1-flash-1017-fast", "medium"),
+            ("deepseek/deepseek-v4.1-flash-1017-ultrafast", "max"),
+            ("deepseek/deepseek-v4.1-flash-1017-ultrafast", "auto"),
+        ] {
+            let mut config = Config::default();
+            config.set_model(Some(model.to_owned()));
+            config.set_reasoning(Some(reasoning.to_owned()));
+            let saved: Value = serde_json::from_slice(&config.bytes().unwrap()).unwrap();
+            assert_eq!(saved["version"], 4);
+
+            let loaded = load(saved).unwrap();
+            assert_eq!(loaded.model(), Some(model));
+            assert_eq!(loaded.reasoning(), Some(reasoning));
+        }
+    }
+
+    #[test]
     fn every_response_color_round_trips_by_id() {
         for color in ResponseColor::ALL {
             assert_eq!(ResponseColor::parse(color.id()), Some(color));

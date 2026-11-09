@@ -1,8 +1,8 @@
 # wut
 
-A tiny, fast terminal assistant powered by Cerebras or Groq. Ask a quick question, recall
-a command, or let it inspect your current workspace. It cannot edit files or run
-commands.
+A tiny, fast terminal assistant powered by Cerebras, Groq, or Vercel AI Gateway.
+Ask a quick question, recall a command, or let it inspect your current workspace.
+It cannot edit files or run commands.
 
 
 
@@ -10,8 +10,9 @@ https://github.com/user-attachments/assets/2c1c2660-7630-4688-80a2-8beebeacf2c0
 
 
 
-Requires a [Cerebras API key](https://cloud.cerebras.ai/) or a
-[Groq API key](https://console.groq.com/keys).
+Requires an API key for the selected provider:
+[Cerebras](https://cloud.cerebras.ai/), [Groq](https://console.groq.com/keys), or
+[Vercel AI Gateway](https://vercel.com/ai-gateway).
 
 ## Install
 
@@ -27,21 +28,39 @@ brew tap ethanolivertroy/wut https://github.com/ethanolivertroy/wut
 brew install ethanolivertroy/wut/wut
 ```
 
-The installer works too, and it can save your API key for you:
+The installer works too, and it can save your Cerebras API key for you:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanolivertroy/wut/main/install.sh | sh
 ```
 
-Package managers do not save an API key. Set `CEREBRAS_API_KEY` in the process
-environment to avoid saving a key through wut, or use the installer's optional
-credential prompt. Saved keys are **plaintext, not encrypted or stored in an OS
-keychain**. The installer restricts the `~/.config/wut` directory to mode 700 and
-the `credentials` file inside it to mode 600. If `XDG_CONFIG_HOME` is set, wut uses
-`$XDG_CONFIG_HOME/wut/credentials` instead. Manually created credentials must have
-the same protections: wut refuses files or directories accessible to other users,
-symlinks at either of those two paths, files owned by another user, and hard-linked
-credential files. Environment credentials take priority over saved credentials.
+Save an API key with hidden terminal input:
+
+```sh
+wut --set-key cerebras
+wut --set-key groq
+wut --set-key ai-gateway
+```
+
+Run `wut --set-key` to choose a provider, or use **API key** in
+`wut --settings` for the selected model's provider. Never put the key itself in
+the command. Only the selected provider's key is required; package managers do
+not save one automatically.
+
+Saved keys are **plaintext, not encrypted or stored in an OS keychain**.
+Cerebras uses `~/.config/wut/credentials`, Groq uses
+`~/.config/wut/groq/credentials`, and AI Gateway uses
+`~/.config/wut/ai-gateway/credentials`. Paths use `$XDG_CONFIG_HOME` in place of
+`~/.config` when it is set. Saving writes the key atomically with mode `0600`
+and sets the credential directories to `0700`. Loading rejects unsafe permissions
+or ownership, symlinks, and hard-linked credential files. Re-entering a key with
+`--set-key` can replace an owned regular file and repair overly broad permissions;
+ordinary loading does not modify existing files. On macOS, credential files and
+directories must also have no extended ACL entries.
+
+Set `CEREBRAS_API_KEY`, `GROQ_API_KEY`, or `AI_GATEWAY_API_KEY` in the process
+environment to avoid saving a key through wut. Environment credentials take
+priority over saved credentials for that provider.
 
 Provider streams are limited to 1 MiB per line, 16 MiB per response, and 128
 tool-call slots. Over-limit or invalid streams fail without saving a completed
@@ -53,9 +72,9 @@ config, 64 MiB per saved session, and 8 KiB for the update cache. Oversized save
 fail without replacing previously saved data. Unreadable sessions are skipped
 with a warning so the remaining history stays accessible.
 
-For Groq, set `GROQ_API_KEY` in the process environment. Groq never uses your
-Cerebras key or its saved credentials file. Choose a model in `wut --settings`,
-or pass its ID before a question:
+For Groq, run `wut --set-key groq` or set `GROQ_API_KEY` in the process
+environment. Groq never uses your Cerebras key or its saved credentials file.
+Choose a model in `wut --settings`, or pass its ID before a question:
 
 ```sh
 wut --models
@@ -67,6 +86,10 @@ The Groq choices are GPT-OSS 20B and 120B, both with low reasoning by default.
 `--reasoning medium` or `high` spends more time thinking; `auto` uses the optional
 TypeSafe integration. Command-line model choices leave your saved defaults
 unchanged. A continued chat remembers its model unless you override it.
+
+For DeepSeek V4.1 Flash 1017 Fast or Ultrafast through Vercel AI Gateway, run
+`wut --set-key ai-gateway` or set `AI_GATEWAY_API_KEY`, then choose a DeepSeek
+model in `wut --settings`. `wut --models` lists the available model IDs.
 
 Cerebras has archived Gemma 4 31B. Existing Gemma defaults and saved chats use
 GPT-OSS 120B on Cerebras instead; its unsupported `none` reasoning level becomes
@@ -106,7 +129,7 @@ and directory listings scan at most 20,000 entries; listings and text results
 are truncated to 32 KiB plus a limit notice.
 
 Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
-Jev model triage each question before it reaches Cerebras. One fast System One
+Jev model triage each question before it reaches the answer model. One fast System One
 request judges whether the question needs the workspace tools, whether it needs
 web search, and how much thinking it calls for. wut drops tools only when Jev
 is confident they are unnecessary, and a TypeSafe failure or an answer slower
