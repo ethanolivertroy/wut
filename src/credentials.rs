@@ -193,7 +193,15 @@ fn key_error(provider: Provider, message: impl std::fmt::Display) -> Error {
 
 fn open_at(directory: &File, name: &CStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
     // SAFETY: name is NUL-terminated; directory owns a live descriptor.
-    let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags, mode) };
+    // Darwin's mode_t is u16; variadic arguments require C integer promotion.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags,
+            mode as libc::c_uint,
+        )
+    };
     if descriptor < 0 {
         Err(io::Error::last_os_error())
     } else {
