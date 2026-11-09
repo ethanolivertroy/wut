@@ -53,7 +53,9 @@ impl Agent {
         let mut messages = vec![Message::text(Role::System, system_prompt(instructions))];
         for turn in history {
             messages.push(Message::text(Role::User, turn.user.clone()));
-            messages.push(Message::text(Role::Assistant, turn.assistant.clone()));
+            let mut assistant = Message::text(Role::Assistant, turn.assistant.clone());
+            assistant.reasoning.clone_from(&turn.reasoning);
+            messages.push(assistant);
         }
         Ok(Self {
             client: Client::new(&model)?,
@@ -85,6 +87,13 @@ impl Agent {
     /// its API key. Callers print it once the answer is on screen.
     pub fn take_notice(&mut self) -> Option<Error> {
         self.notice.take()
+    }
+
+    /// Saved with the answer so continued Gateway tool requests can replay it.
+    pub fn last_reasoning(&self) -> Option<&str> {
+        self.messages
+            .last()
+            .and_then(|message| message.reasoning.as_deref())
     }
 
     fn ask_inner(
@@ -134,8 +143,9 @@ impl Agent {
                 // later question, and a saved session drops them anyway.
                 self.messages.truncate(start);
                 self.messages.push(Message::text(Role::User, question));
-                self.messages
-                    .push(Message::text(Role::Assistant, outcome.content.clone()));
+                let mut assistant = Message::text(Role::Assistant, outcome.content.clone());
+                assistant.reasoning = outcome.reasoning;
+                self.messages.push(assistant);
                 return Ok(outcome.content);
             }
             self.apply_tool_turn(outcome, root, on_tool, &mut read_files)?;
@@ -185,6 +195,7 @@ impl Agent {
         read_files: &mut bool,
     ) -> Result<()> {
         let mut assistant = Message::text(Role::Assistant, outcome.content);
+        assistant.reasoning = outcome.reasoning;
         assistant.tool_calls = outcome.tool_calls.clone();
         self.messages.push(assistant);
         for call in outcome.tool_calls {
@@ -614,6 +625,60 @@ mod tests {
             assert!(agent.messages.is_empty());
             assert_eq!(server.join().unwrap().len(), 2);
         }
+    }
+
+    #[test]
+    fn gateway_tool_rounds_and_followups_replay_reasoning_without_displaying_it() {
+        let (base, server) = serve(vec![
+            sse(&[
+                r#"{"choices":[{"delta":{"reasoning":"Inspect files first."}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"ls","arguments":"{}"}}]}}]}"#,
+            ]),
+            sse(&[
+                r#"{"choices":[{"delta":{"reasoning":"Report the listing."}}]}"#,
+                r#"{"choices":[{"delta":{"content":"Listed the files."}}]}"#,
+            ]),
+            sse(&[r#"{"choices":[{"delta":{"content":"Yes."}}]}"#]),
+        ]);
+        let mut agent = test_agent(&base);
+        agent.client = Client::for_provider_test(&base, crate::cerebras::Provider::AiGateway);
+        agent.model = "deepseek/deepseek-v4.1-flash-1017-ultrafast".to_owned();
+        agent.effort = Some("high".to_owned());
+        let mut visible = String::new();
+        agent
+            .ask(
+                "what is here?",
+                &std::env::temp_dir(),
+                &mut |text| {
+                    visible.push_str(text);
+                    Ok(())
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(visible, "Listed the files.");
+        assert_eq!(agent.last_reasoning(), Some("Report the listing."));
+        agent
+            .ask("sure?", &std::env::temp_dir(), &mut |_| Ok(()), &mut |_| {})
+            .unwrap();
+
+        let requests: Vec<serde_json::Value> = server
+            .join()
+            .unwrap()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        assert_eq!(
+            requests[1]["messages"][1]["reasoning"],
+            "Inspect files first."
+        );
+        assert_eq!(requests[1]["messages"][2]["role"], "tool");
+        assert_eq!(
+            requests[2]["messages"][1]["reasoning"],
+            "Report the listing."
+        );
+        assert_eq!(requests[2]["reasoning_effort"], "high");
+        assert_eq!(requests[2]["messages"].as_array().unwrap().len(), 3);
     }
 
     fn tool_call(name: &str, arguments: &str) -> String {

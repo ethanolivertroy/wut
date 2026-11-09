@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 
+use crate::cerebras::Provider;
 use crate::error::{Error, Result};
 
 pub const HELP: &str = concat!(
@@ -10,6 +11,7 @@ pub const HELP: &str = concat!(
     "  wut -c [QUESTION...]\n",
     "  wut --sessions\n",
     "  wut --settings\n",
+    "  wut --set-key [cerebras|groq|ai-gateway]\n",
     "  wut --models\n",
     "  wut --benchmark [--model MODEL]\n",
     "  wut --upgrade\n",
@@ -24,6 +26,7 @@ pub const HELP: &str = concat!(
     "      --models        List models and required API key variables\n",
     "      --benchmark     Measure first-text and total response time\n",
     "      --settings      Configure defaults and instructions\n",
+    "      --set-key       Save an API key using hidden input\n",
     "      --upgrade       Upgrade to the latest release\n",
     "  -h, --help          Print help\n",
     "  -V, --version       Print version\n",
@@ -36,6 +39,7 @@ pub enum Mode {
     Continue(Vec<String>),
     Sessions,
     Settings,
+    SetKey(Option<Provider>),
     Upgrade,
     UpdateCheck,
     Help,
@@ -61,7 +65,23 @@ impl Invocation {
     }
 }
 
-pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Invocation> {
+pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Invocation> {
+    let args: Vec<_> = args.collect();
+    // Handle credential setup before ordinary option errors or early help
+    // returns. A mistakenly supplied key must never be echoed in an error.
+    if args
+        .iter()
+        .take_while(|arg| arg.as_os_str() != "--")
+        .any(|arg| {
+            arg == "--set-key"
+                || arg
+                    .to_str()
+                    .is_some_and(|arg| arg.starts_with("--set-key="))
+        })
+    {
+        return parse_set_key(&args);
+    }
+    let mut args = args.into_iter();
     let mut words = Vec::new();
     let mut options = true;
     let mut resume = false;
@@ -247,6 +267,26 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Invocation> {
     })
 }
 
+fn parse_set_key(args: &[OsString]) -> Result<Invocation> {
+    let invalid = || {
+        Error::new(
+            "--set-key accepts only an optional provider, with no other arguments",
+            "run 'wut --set-key [cerebras|groq|ai-gateway]'; enter the key only at the hidden prompt",
+        )
+    };
+    if args.first().is_none_or(|arg| arg != "--set-key") || args.len() > 2 {
+        return Err(invalid());
+    }
+    let provider = match args.get(1).and_then(|arg| arg.to_str()) {
+        None if args.len() == 1 => None,
+        Some("cerebras") => Some(Provider::Cerebras),
+        Some("groq") => Some(Provider::Groq),
+        Some("ai-gateway") => Some(Provider::AiGateway),
+        _ => return Err(invalid()),
+    };
+    Ok(Invocation::plain(Mode::SetKey(provider)))
+}
+
 fn set_option(slot: &mut Option<String>, value: String, flag: &str) -> Result<()> {
     if slot.is_some() || value.is_empty() {
         return Err(Error::usage(format!(
@@ -260,6 +300,7 @@ fn set_option(slot: &mut Option<String>, value: String, flag: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{Invocation, Mode, parse};
+    use crate::cerebras::Provider;
 
     fn args(values: &[&str]) -> crate::error::Result<Invocation> {
         parse(values.iter().map(std::ffi::OsString::from))
@@ -323,5 +364,80 @@ mod tests {
         );
         assert_eq!(args(&[]).unwrap().mode, Mode::Interactive);
         assert_eq!(args(&["--help"]).unwrap().mode, Mode::Help);
+    }
+
+    #[test]
+    fn set_key_accepts_each_provider_or_opens_the_chooser() {
+        assert_eq!(
+            args(&["--set-key"]).unwrap(),
+            Invocation::plain(Mode::SetKey(None))
+        );
+        for (name, provider) in [
+            ("cerebras", Provider::Cerebras),
+            ("groq", Provider::Groq),
+            ("ai-gateway", Provider::AiGateway),
+        ] {
+            assert_eq!(
+                args(&["--set-key", name]).unwrap(),
+                Invocation::plain(Mode::SetKey(Some(provider)))
+            );
+        }
+    }
+
+    #[test]
+    fn set_key_rejects_combined_modes_and_overrides() {
+        for other in [
+            "--continue",
+            "--sessions",
+            "--settings",
+            "--models",
+            "--benchmark",
+            "--upgrade",
+            "--internal-update-check",
+            "--help",
+            "--version",
+            "--set-key",
+            "--model=gpt-oss-120b",
+            "--reasoning=low",
+            "question",
+        ] {
+            assert!(args(&["--set-key", other]).is_err());
+            assert!(args(&[other, "--set-key"]).is_err());
+            assert!(args(&["--set-key", "cerebras", other]).is_err());
+        }
+        assert!(args(&["--set-key", "--", "ai-gateway"]).is_err());
+    }
+
+    #[test]
+    fn invalid_key_setup_arguments_are_never_echoed() {
+        let secret = "sk-test-not-a-real-key";
+        let inline = format!("--set-key={secret}");
+        let unknown_flag = format!("--{secret}");
+        for values in [
+            vec!["--set-key", secret],
+            vec!["--set-key", "cerebras", secret],
+            vec!["--set-key", "groq", secret],
+            vec!["--set-key", "ai-gateway", secret],
+            vec![secret, "--set-key"],
+            vec![inline.as_str()],
+            vec!["--set-key", unknown_flag.as_str()],
+            vec![unknown_flag.as_str(), "--set-key"],
+            vec!["--help", "--set-key", secret],
+            vec!["--model", secret, "--set-key"],
+            vec!["--reasoning", secret, "--set-key"],
+        ] {
+            let error = args(&values).unwrap_err();
+            assert!(!error.message().contains(secret));
+            assert!(!error.help().contains(secret));
+            assert!(error.help().contains("hidden prompt"));
+        }
+    }
+
+    #[test]
+    fn an_explicit_separator_keeps_key_setup_text_in_a_question() {
+        assert_eq!(
+            args(&["--", "--set-key", "meaning"]).unwrap().mode,
+            Mode::OneShot("--set-key meaning".to_owned())
+        );
     }
 }

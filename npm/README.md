@@ -1,7 +1,7 @@
 # wut-cli
 
 npm wrapper for [wut](https://github.com/ethanolivertroy/wut) — a tiny, fast
-terminal assistant powered by Cerebras or Groq.
+terminal assistant powered by Cerebras, Groq, or Vercel AI Gateway.
 
 ```sh
 npm install --global wut-cli
@@ -17,18 +17,34 @@ Archive and checksum downloads run in parallel with a shared 60-second deadline.
 The archive response is limited to 32 MiB and the checksum to 4 KiB, including
 chunked responses. Failed downloads leave an existing cached binary intact.
 
-Requires Node 18 or newer. Set `CEREBRAS_API_KEY` or `GROQ_API_KEY` in the process
-environment, then select a model:
+Requires Node 18 or newer and an API key for the selected provider. Save one
+with hidden terminal input:
+
+```sh
+wut --set-key cerebras
+wut --set-key groq
+wut --set-key ai-gateway
+```
+
+Run `wut --set-key` to choose a provider, or use **API key** in
+`wut --settings`. Never pass the key itself as an argument. Then select a model:
 
 ```sh
 wut --models
 wut --model groq:openai/gpt-oss-20b "why is this container restarting?"
 ```
 
-The wrapper does not save credentials. The standalone installer's optional
-prompt can save a Cerebras key in a private plaintext file; the
-[credential documentation](https://github.com/ethanolivertroy/wut#install)
-explains the required permissions and environment-only alternative.
+Keys are saved by the Wut binary as **plaintext, not encrypted or stored in an
+OS keychain**. Saving is atomic, sets the key file to `0600` and credential
+directories to `0700`, and can repair broad permissions when replacing an owned
+regular file. Loading rejects unsafe permissions or ownership, symlinks, and
+hard-linked credential files. On macOS, extended ACL entries are also rejected.
+
+`CEREBRAS_API_KEY`, `GROQ_API_KEY`, and `AI_GATEWAY_API_KEY` in the process
+environment override saved keys for their provider. The
+[credential documentation](https://github.com/ethanolivertroy/wut#install) lists
+the per-provider paths and `$XDG_CONFIG_HOME` support. The npm wrapper itself
+does not save credentials.
 
 ## Other install methods
 

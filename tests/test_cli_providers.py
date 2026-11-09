@@ -8,7 +8,9 @@ import unittest
 
 
 BINARY = Path(os.environ.get(
-    "WUT_TEST_BINARY", str(Path(__file__).resolve().parents[1] / "target/debug/wut")
+    "WUT_TEST_BINARY", os.environ.get(
+        "WUT_BIN", str(Path(__file__).resolve().parents[1] / "target/debug/wut")
+    )
 )).resolve()
 
 
@@ -21,6 +23,9 @@ class ProviderCliTests(unittest.TestCase):
             "XDG_CONFIG_HOME": self.temporary.name,
             "XDG_CACHE_HOME": self.temporary.name,
             "WUT_NO_UPDATE_CHECK": "1",
+            # A regression must not turn a missing-key test into a live request.
+            "HTTP_PROXY": "http://127.0.0.1:0",
+            "HTTPS_PROXY": "http://127.0.0.1:0",
         }
 
     def run_cli(self, *args):
@@ -38,6 +43,9 @@ class ProviderCliTests(unittest.TestCase):
         self.assertIn("groq:openai/gpt-oss-20b", result.stdout)
         self.assertIn("GROQ_API_KEY", result.stdout)
         self.assertIn("CEREBRAS_API_KEY", result.stdout)
+        self.assertIn("deepseek/deepseek-v4.1-flash-1017-fast", result.stdout)
+        self.assertIn("deepseek/deepseek-v4.1-flash-1017-ultrafast", result.stdout)
+        self.assertIn("AI_GATEWAY_API_KEY", result.stdout)
         self.assertNotIn("gemma-4-31b", result.stdout)
 
     def test_a_cerebras_key_is_never_used_for_groq(self):
@@ -54,10 +62,38 @@ class ProviderCliTests(unittest.TestCase):
         self.assertIn("no Cerebras API key", result.stderr)
         self.assertNotIn("fake-groq-secret", result.stdout + result.stderr)
 
+    def test_other_providers_keys_are_never_used_for_gateway(self):
+        self.environment["CEREBRAS_API_KEY"] = "fake-cerebras-secret"
+        self.environment["GROQ_API_KEY"] = "fake-groq-secret"
+        for model in (
+            "deepseek/deepseek-v4.1-flash-1017-fast",
+            "deepseek/deepseek-v4.1-flash-1017-ultrafast",
+        ):
+            with self.subTest(model=model):
+                result = self.run_cli("--model", model, "hello")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("AI_GATEWAY_API_KEY", result.stderr)
+                self.assertNotIn("fake-cerebras-secret", result.stdout + result.stderr)
+                self.assertNotIn("fake-groq-secret", result.stdout + result.stderr)
+
+    def test_a_gateway_key_is_never_used_for_cerebras_or_groq(self):
+        self.environment["AI_GATEWAY_API_KEY"] = "fake-gateway-secret"
+        for model, expected in (
+            ("gpt-oss-120b", "CEREBRAS_API_KEY"),
+            ("groq:openai/gpt-oss-20b", "GROQ_API_KEY"),
+        ):
+            with self.subTest(model=model):
+                result = self.run_cli("--model", model, "hello")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn("fake-gateway-secret", result.stdout + result.stderr)
+
     def test_invalid_models_and_effort_fail_before_authentication(self):
         for arguments, expected in [
             (("--model", "typo", "hello"), "unknown model"),
             (("--model", "groq:openai/gpt-oss-20b", "--reasoning", "none", "hello"), "not supported"),
+            (("--model", "deepseek/deepseek-v4.1-flash-1017-fast", "--reasoning", "max", "hello"), "not supported"),
+            (("--model", "deepseek/deepseek-v4.1-flash-1017-ultrafast", "--reasoning", "medium", "hello"), "not supported"),
         ]:
             result = self.run_cli(*arguments)
             self.assertEqual(result.returncode, 1)

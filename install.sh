@@ -168,16 +168,18 @@ install_cerebras_key() {
   if [ -e "$credentials" ] && [ ! -f "$credentials" ]; then
     error "credentials must be a regular file"
   fi
-  umask 077
-  mkdir -p "$credentials_dir"
-  chmod 700 "$credentials_dir"
-  if [ -f "$credentials" ]; then
-    chmod 600 "$credentials"
+  if [ -s "$credentials" ]; then
+    printf '\nExisting Cerebras credentials were left unchanged; the installer does not validate or repair existing permissions.\n' >&2
+    return
   fi
-  [ ! -s "$credentials" ] || return 0
 
   if [ ! -t 2 ] || [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-    printf '\nSet CEREBRAS_API_KEY, or rerun install.sh from a terminal to save a key in a private plaintext file.\n' >&2
+    printf '\nRun wut --set-key cerebras from a terminal to save your API key, or set CEREBRAS_API_KEY in the process environment.\n' >&2
+    return
+  fi
+
+  if ! "$install_dir/wut" --help 2>/dev/null | grep -Fq -- '--set-key'; then
+    printf '\nThis wut version does not support built-in key setup. Export CEREBRAS_API_KEY, or upgrade to use wut --set-key cerebras.\n' >&2
     return
   fi
 
@@ -186,30 +188,12 @@ install_cerebras_key() {
   case "$answer" in
     y | Y | yes | YES | Yes) ;;
     *)
-      printf 'You can set CEREBRAS_API_KEY or rerun the installer later.\n' >&2
+      printf 'You can run wut --set-key cerebras later, or set CEREBRAS_API_KEY.\n' >&2
       return
       ;;
   esac
 
-  printf 'Cerebras API key (input hidden): ' > /dev/tty
-  require stty
-  tty_state="$(stty -g < /dev/tty)" || error "could not disable terminal echo"
-  stty -echo < /dev/tty
-  key=''
-  IFS= read -r key < /dev/tty || true
-  stty "$tty_state" < /dev/tty
-  tty_state=''
-  printf '\n' > /dev/tty
-  [ -n "$key" ] || error "API key was empty"
-
-  credentials_staged="$(mktemp "$credentials_dir/.credentials.XXXXXXXXXX")" ||
-    error "could not create a private credentials file"
-  printf '%s\n' "$key" > "$credentials_staged"
-  chmod 600 "$credentials_staged"
-  mv -f "$credentials_staged" "$credentials"
-  credentials_staged=''
-  key=''
-  printf 'saved Cerebras API key to %s\n' "$credentials" >&2
+  "$install_dir/wut" --set-key cerebras < /dev/tty > /dev/tty 2>&1
 }
 
 main() {
@@ -236,13 +220,9 @@ main() {
   temp_dir="$(mktemp -d)" || error "could not create a temporary directory"
   staged=""
   integration_staged=""
-  credentials_staged=""
-  tty_state=""
   cleanup() {
-    [ -z "$tty_state" ] || stty "$tty_state" < /dev/tty 2>/dev/null || true
     [ -z "$staged" ] || rm -f "$staged"
     [ -z "$integration_staged" ] || rm -f "$integration_staged"
-    [ -z "$credentials_staged" ] || rm -f "$credentials_staged"
     rm -rf "$temp_dir"
   }
   trap cleanup 0

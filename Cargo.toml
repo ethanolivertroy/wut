@@ -3,7 +3,7 @@ name = "wut"
 version = "0.0.5"
 edition = "2024"
 rust-version = "1.88"
-description = "A tiny, fast terminal assistant powered by Cerebras or Groq"
+description = "A tiny, fast terminal assistant"
 license = "MIT"
 repository = "https://github.com/ethanolivertroy/wut"
 readme = "README.md"
@@ -19,7 +19,7 @@ path = "src/main.rs"
 crossterm = { version = "0.29", default-features = false, features = ["bracketed-paste", "events"] }
 serde_json = { version = "1", features = ["raw_value"] }
 unicode-width = { version = "0.2", default-features = false }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 walkdir = "2"
 ctrlc = { version = "3", default-features = false }

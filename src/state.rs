@@ -29,6 +29,7 @@ pub struct SessionSettings {
 pub struct Turn {
     pub user: String,
     pub assistant: String,
+    pub reasoning: Option<String>,
 }
 
 impl Session {
@@ -43,10 +44,11 @@ impl Session {
         }
     }
 
-    pub fn add_turn(&mut self, user: &str, assistant: String) {
+    pub fn add_turn(&mut self, user: &str, assistant: String, reasoning: Option<String>) {
         self.turns.push(Turn {
             user: user.to_owned(),
             assistant,
+            reasoning,
         });
         self.updated_at = now();
     }
@@ -65,6 +67,7 @@ impl Session {
             "turns": self.turns.iter().map(|turn| json!({
                 "user": turn.user,
                 "assistant": turn.assistant,
+                "reasoning": turn.reasoning,
             })).collect::<Vec<_>>(),
         })
     }
@@ -96,6 +99,11 @@ impl Session {
                         .as_str()
                         .ok_or_else(|| invalid_session("turn is missing 'assistant'"))?
                         .to_owned(),
+                    reasoning: match turn.get("reasoning") {
+                        None | Some(Value::Null) => None,
+                        Some(Value::String(reasoning)) => Some(reasoning.clone()),
+                        Some(_) => return Err(invalid_session("turn has invalid 'reasoning'")),
+                    },
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -381,7 +389,7 @@ mod tests {
     fn a_corrupt_session_file_does_not_hide_the_others() {
         let directory = directory();
         let mut session = Session::new("cerebras", "abc".to_owned(), Path::new("/work"));
-        session.add_turn("hi", "hello".to_owned());
+        session.add_turn("hi", "hello".to_owned(), None);
         save_to(&directory, &session).unwrap();
         std::fs::write(directory.join("broken.json"), "{not json").unwrap();
         std::fs::write(directory.join("empty.json"), "").unwrap();
@@ -398,5 +406,41 @@ mod tests {
         assert_eq!(latest.turns[0].user, "hi");
         assert!(latest_from(&directory, "/elsewhere").unwrap().is_none());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn session_reasoning_round_trips_without_a_version_change() {
+        let mut session = Session::new("ai-gateway", "abc".to_owned(), Path::new("/work"));
+        session.add_turn("why?", "because".to_owned(), Some("analysis".to_owned()));
+        session.add_turn("thanks", "welcome".to_owned(), None);
+        let saved = session.to_json();
+
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["turns"][0]["reasoning"], "analysis");
+        assert_eq!(Session::from_json(&saved).unwrap(), session);
+    }
+
+    #[test]
+    fn old_session_turns_without_reasoning_still_load() {
+        let mut session = Session::new("cerebras", "abc".to_owned(), Path::new("/work"));
+        session.add_turn("hi", "hello".to_owned(), None);
+        let mut saved = session.to_json();
+        saved["turns"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning");
+
+        assert_eq!(Session::from_json(&saved).unwrap(), session);
+    }
+
+    #[test]
+    fn malformed_turn_reasoning_is_rejected() {
+        let mut session = Session::new("ai-gateway", "abc".to_owned(), Path::new("/work"));
+        session.add_turn("hi", "hello".to_owned(), None);
+        let mut saved = session.to_json();
+        saved["turns"][0]["reasoning"] = serde_json::json!(17);
+
+        let error = Session::from_json(&saved).unwrap_err();
+        assert!(error.message().contains("turn has invalid 'reasoning'"));
     }
 }
