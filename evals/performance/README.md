@@ -27,3 +27,20 @@ and model latency are excluded. The repeated-wildcard fixture is intentionally
 small so the reference implementation completes safely. All samples from the
 [recorded run](2026-11-08-glob-zero.json) are retained. Correctness tests compare
 the implementations over exhaustive small inputs and separator/UTF-8 cases.
+
+Run the synthetic early-match workspace search benchmark with:
+
+```sh
+cargo test --locked --release tools::tests::benchmark_early_grep -- --exact --ignored --nocapture
+```
+
+It creates 4,000 files, each with 201 matching lines, so any first file reaches
+the 200-line result limit. The baseline reconstructs the previous eager file
+collection. Both paths then use the same scanner and assert equal results.
+This isolates traversal/collection and excludes the old redundant per-file
+stat, fixture creation, regex compilation and provider latency. Each pair runs
+eager then lazy; five pairs follow one warmup, so filesystem caching can affect
+the comparison. The [zero run](2026-11-09-workspace-zero.json), dated in UTC,
+retains every measured sample: median 1.368 ms eager versus 0.241 ms lazy.
+This measures a favorable early-match case, not all workspace searches or
+end-to-end answer latency. No API credentials are used.

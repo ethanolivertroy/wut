@@ -71,6 +71,34 @@ class ProviderCliTests(unittest.TestCase):
             self.assertNotIn(control, result.stderr)
         self.assertIn("unknown model", result.stderr)
 
+    def test_config_named_pipe_is_rejected_without_blocking(self):
+        config = Path(self.temporary.name) / "config.json"
+        os.mkfifo(config)
+        self.environment["WUT_CONFIG"] = str(config)
+        result = self.run_cli("hello")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("regular file", result.stderr)
+
+    def test_session_named_pipe_is_skipped_without_blocking(self):
+        state = Path(self.temporary.name) / "state"
+        sessions = state / "sessions"
+        sessions.mkdir(parents=True)
+        os.mkfifo(sessions / "pipe.json")
+        self.environment["WUT_STATE_DIR"] = str(state)
+        result = self.run_cli("--sessions")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("regular file", result.stderr)
+
+    def test_oversized_config_is_rejected_before_parsing(self):
+        config = Path(self.temporary.name) / "config.json"
+        with config.open("wb") as file:
+            file.truncate(1024 * 1024 + 1)
+        self.environment["WUT_CONFIG"] = str(config)
+        result = self.run_cli("hello")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exceeds 1048576 bytes", result.stderr)
+        self.assertNotIn("could not parse", result.stderr)
+
     def test_unavailable_benchmarks_do_not_invent_latency_measurements(self):
         result = self.run_cli("--benchmark", "--model", "groq:openai/gpt-oss-20b")
         self.assertEqual(result.returncode, 1)

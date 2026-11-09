@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Stop workspace traversal as soon as `grep` reaches its match limit. Bound
+  directory listing work and output, and avoid redundant file metadata calls.
+- Bound config, session and update-cache reads to regular files and explicit
+  size limits. Reject pipes without blocking and preserve existing saved data
+  when a new save exceeds its loader's limit.
+
 - Compile workspace globs once per search, add fast paths for literals and
   suffixes, and replace recursive wildcard backtracking with a bounded regex
   matcher. Reject glob patterns longer than 512 bytes.

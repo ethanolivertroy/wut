@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -7,6 +6,8 @@ use crate::cerebras;
 use crate::error::{Error, Result};
 use crate::instructions::Instructions;
 use crate::storage;
+
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 pub struct Config {
     model: Option<String>,
@@ -237,7 +238,7 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        storage::write_private(&path()?, &self.bytes()?, "wut config")
+        storage::write_private(&path()?, &self.bytes()?, "wut config", MAX_CONFIG_BYTES)
     }
 
     fn bytes(&self) -> Result<Vec<u8>> {
@@ -317,10 +318,10 @@ fn normalize_model(model: Option<String>) -> Result<Option<String>> {
 }
 
 fn load_file(path: &Path) -> Result<Config> {
-    let bytes = fs::read(path).map_err(|error| {
+    let bytes = storage::read_bounded(path, MAX_CONFIG_BYTES).map_err(|error| {
         Error::new(
             format!("could not read '{}': {error}", path.display()),
-            "check its permissions and try again",
+            "check the file type, size and permissions, then try again",
         )
     })?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| {

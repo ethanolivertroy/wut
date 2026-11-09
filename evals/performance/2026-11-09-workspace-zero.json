@@ -1,0 +1,37 @@
+{
+  "host": "zero",
+  "baseline_commit": "fd81cdb51da0f4ae65020859a6fd4eb9bd951bb3",
+  "candidate_branch": "etgohome/stream-workspace-and-bound-json",
+  "candidate_tools_sha256": "645039d38973c874ab2c25a57ff36f4c654fb6b4906c79fffcfd2d99a5af814b",
+  "command": "cargo test --locked --release tools::tests::benchmark_early_grep -- --exact --ignored --nocapture",
+  "fixture_files": 4000,
+  "matches_per_file": 201,
+  "match_limit": 200,
+  "warmup_pairs": 1,
+  "eager_ms": [
+    1.370473,
+    1.362557,
+    1.368322,
+    1.3656709999999999,
+    1.372059
+  ],
+  "lazy_ms": [
+    0.240683,
+    0.241503,
+    0.240788,
+    0.23994700000000002,
+    0.243766
+  ],
+  "scope": "Synthetic local early-match search. The baseline reconstructs the previous eager candidate collection, then both paths use the same new scanner and assert equal results. This isolates candidate traversal/collection and excludes the previous redundant per-file stat. It is not a full before/after binary or model latency comparison.",
+  "timing_excludes": [
+    "fixture creation",
+    "regex compilation",
+    "warmup pair",
+    "provider requests"
+  ],
+  "order": "Each pair runs eager then lazy; one warmup pair precedes five retained pairs. Cached filesystem state can affect results.",
+  "median_eager_ms": 1.368322,
+  "median_lazy_ms": 0.240788,
+  "median_speedup": 5.682683522434673,
+  "measured_on_utc": "2026-11-09"
+}
