@@ -10,6 +10,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest wait for the next bytes of a response. Each read restarts
 /// it, so a long answer that keeps streaming is never cut off.
 const READ_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_STREAM_LINE_BYTES: usize = 1024 * 1024;
+const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOOL_CALLS: usize = 128;
 const DEFAULT_MODEL: &str = "gpt-oss-120b";
 const ENV_KEY: &str = "CEREBRAS_API_KEY";
 const CREDENTIALS_FILE: &str = "wut/credentials";
@@ -533,9 +536,19 @@ fn decode_event(data: &str) -> Result<Option<Event>> {
         .map(str::to_owned);
     let mut tool_calls = Vec::new();
     if let Some(values) = choice["delta"]["tool_calls"].as_array() {
+        if values.len() > MAX_TOOL_CALLS {
+            return Err(tool_call_limit_error());
+        }
         for value in values {
+            let index = match value.get("index") {
+                None => 0,
+                Some(index) => index
+                    .as_u64()
+                    .filter(|index| *index < MAX_TOOL_CALLS as u64)
+                    .ok_or_else(tool_call_limit_error)? as usize,
+            };
             tool_calls.push(Fragment {
-                index: value["index"].as_u64().unwrap_or(0) as usize,
+                index,
                 id: value["id"].as_str().map(str::to_owned),
                 name: value["function"]["name"].as_str().map(str::to_owned),
                 arguments: value["function"]["arguments"].as_str().map(str::to_owned),
@@ -555,29 +568,73 @@ fn decode_event(data: &str) -> Result<Option<Event>> {
 struct EventStream<R: BufRead> {
     reader: R,
     completed: bool,
+    line: Vec<u8>,
+    line_limit: usize,
+    byte_limit: usize,
+    bytes_seen: usize,
 }
 
 impl<R: BufRead> EventStream<R> {
     fn new(reader: R) -> Self {
+        Self::with_limits(reader, MAX_STREAM_LINE_BYTES, MAX_STREAM_BYTES)
+    }
+
+    fn with_limits(reader: R, line_limit: usize, byte_limit: usize) -> Self {
         Self {
             reader,
             completed: false,
+            line: Vec::new(),
+            line_limit,
+            byte_limit,
+            bytes_seen: 0,
+        }
+    }
+
+    /// Reuse the line buffer and check limits before copying bytes. Taking a
+    /// bounded reader per line alone would not bound a stream of short lines.
+    fn read_line(&mut self) -> Result<usize> {
+        self.line.clear();
+        loop {
+            crate::cancel::check()?;
+            let available = self.reader.fill_buf().map_err(|error| {
+                Error::new(
+                    format!("could not read the streaming response: {error}"),
+                    "check your connection and try again",
+                )
+            })?;
+            if available.is_empty() {
+                return Ok(self.line.len());
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let take = newline.map_or(available.len(), |index| index + 1);
+            if take > self.line_limit.saturating_sub(self.line.len()) {
+                return Err(stream_size_error("line", self.line_limit));
+            }
+            if take > self.byte_limit.saturating_sub(self.bytes_seen) {
+                return Err(stream_size_error("body", self.byte_limit));
+            }
+            self.line.extend_from_slice(&available[..take]);
+            self.reader.consume(take);
+            self.bytes_seen += take;
+            if newline.is_some() {
+                return Ok(self.line.len());
+            }
         }
     }
 
     fn next(&mut self) -> Result<Option<Event>> {
         loop {
             crate::cancel::check()?;
-            let mut line = String::new();
-            let read = self.reader.read_line(&mut line).map_err(|error| {
+            let read = self.read_line()?;
+            if read == 0 {
+                return Ok(None);
+            }
+            let line = std::str::from_utf8(&self.line).map_err(|error| {
                 Error::new(
                     format!("could not read the streaming response: {error}"),
                     "check your connection and try again",
                 )
             })?;
-            if read == 0 {
-                return Ok(None);
-            }
             let line = line.trim_end_matches(['\n', '\r']);
             if let Some(data) = line.strip_prefix("data:") {
                 if data.trim() == "[DONE]" {
@@ -590,6 +647,22 @@ impl<R: BufRead> EventStream<R> {
             }
         }
     }
+}
+
+fn stream_size_error(part: &str, limit: usize) -> Error {
+    Error::new(
+        format!("the streaming response {part} exceeds {limit} bytes"),
+        "ask for a shorter response or try a different model",
+    )
+}
+
+fn tool_call_limit_error() -> Error {
+    Error::new(
+        format!(
+            "the streaming response has invalid or excessive tool-call indices (limit {MAX_TOOL_CALLS})"
+        ),
+        "try a simpler question or a different model",
+    )
 }
 
 fn auth_key(provider: Provider) -> Result<String> {
@@ -1196,6 +1269,87 @@ mod tests {
             (calls[1].name.as_str(), calls[1].arguments.as_str()),
             ("ls", "{}")
         );
+    }
+
+    #[test]
+    fn rejects_untrusted_tool_indices_before_allocating_slots() {
+        for index in [
+            serde_json::json!(u64::MAX),
+            serde_json::json!(128),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("0"),
+        ] {
+            let event = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+                {"index":index,"function":{"name":"read","arguments":"{}"}}
+            ]}}]});
+            let (outcome, _) = collect(&format!("data: {event}\ndata: [DONE]\n"));
+            assert!(outcome.is_err(), "index {index} was accepted");
+        }
+    }
+
+    #[test]
+    fn stream_limits_cover_unterminated_lines_and_total_body_bytes() {
+        for suffix in ["", "\n"] {
+            let input = format!("{}{suffix}", "x".repeat(33));
+            let mut stream = EventStream::with_limits(input.as_bytes(), 32, 128);
+            assert!(
+                stream
+                    .next()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("line exceeds 32")
+            );
+            assert!(stream.line.len() <= 32);
+        }
+        let input = format!("{}data: [DONE]\n", ":\n".repeat(17));
+        let mut stream = EventStream::with_limits(input.as_bytes(), 16, 32);
+        assert!(
+            stream
+                .next()
+                .unwrap_err()
+                .to_string()
+                .contains("body exceeds 32")
+        );
+        assert!(stream.bytes_seen <= 32);
+
+        let input = format!("data: [DONE]\n{}", "x".repeat(128));
+        let mut stream = EventStream::with_limits(input.as_bytes(), 16, 16);
+        assert!(stream.next().unwrap().is_none());
+        assert!(
+            stream.completed,
+            "must stop at DONE without draining the remaining body"
+        );
+    }
+
+    #[test]
+    fn bounded_lines_handle_split_utf8_and_reject_invalid_encoding() {
+        let input =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"café ☃\"}}]}\r\n\ndata: [DONE]\n";
+        let reader = std::io::BufReader::with_capacity(1, input.as_bytes());
+        let outcome = collect_stream(EventStream::new(reader), &mut |_| Ok(())).unwrap();
+        assert_eq!(outcome.content, "café ☃");
+        let mut stream = EventStream::new(&b"data: \xff\n"[..]);
+        assert!(stream.next().is_err());
+    }
+
+    #[test]
+    fn excessive_fragments_are_rejected_and_last_valid_index_still_works() {
+        let calls = vec![serde_json::json!({"index":0}); super::MAX_TOOL_CALLS + 1];
+        let event = serde_json::json!({"choices":[{"delta":{"tool_calls":calls}}]});
+        assert!(
+            collect(&format!("data: {event}\ndata: [DONE]\n"))
+                .0
+                .is_err()
+        );
+        let event = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+            {"index":super::MAX_TOOL_CALLS-1,"id":"last","function":{"name":"ls","arguments":"{}"}}
+        ]}}]});
+        let outcome = collect(&format!("data: {event}\ndata: [DONE]\n"))
+            .0
+            .unwrap();
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].id, "last");
     }
 
     #[test]

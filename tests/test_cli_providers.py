@@ -64,6 +64,13 @@ class ProviderCliTests(unittest.TestCase):
             self.assertIn(expected, result.stderr)
             self.assertNotIn("no API key", result.stderr)
 
+    def test_error_messages_do_not_emit_terminal_controls(self):
+        result = self.run_cli("--model", "bad\x1b]52;c;RkFLRQ==\x07\u009b2J\rspoofed", "hello")
+        self.assertEqual(result.returncode, 1)
+        for control in ["\x1b", "\x07", "\u009b"]:
+            self.assertNotIn(control, result.stderr)
+        self.assertIn("unknown model", result.stderr)
+
     def test_unavailable_benchmarks_do_not_invent_latency_measurements(self):
         result = self.run_cli("--benchmark", "--model", "groq:openai/gpt-oss-20b")
         self.assertEqual(result.returncode, 1)

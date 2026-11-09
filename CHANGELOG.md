@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Compile workspace globs once per search, add fast paths for literals and
+  suffixes, and replace recursive wildcard backtracking with a bounded regex
+  matcher. Reject glob patterns longer than 512 bytes.
+- Reuse the provider stream's line buffer and bound line/body sizes and
+  tool-call indices before allocation. Reject malformed or oversized streams
+  without recording an incomplete turn.
+- Escape terminal controls in diagnostics, including provider messages and
+  untrusted path or model names.
 - Rasterize diagrams to their terminal display width and cap the pixel buffer
   at 16 MiB, falling back to Mermaid text for oversized images.
 - Disable local-file and embedded-image references in diagrams, including
