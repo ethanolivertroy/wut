@@ -107,12 +107,7 @@ fn run() -> Result<()> {
             cli::Mode::SetKey(provider) => credentials::run(provider),
         }
     })();
-    let notice = update_check.notice();
-    if result.is_ok()
-        && let Some(notice) = notice
-    {
-        eprintln!("{notice}");
-    }
+    update_check.finish(result.is_ok());
     result
 }
 
@@ -421,7 +416,11 @@ fn run_interactive(
                         saved.settings = Some(session_settings(&settings));
                         state::save(saved)?;
                     }
-                    agent = open_agent(&settings, config.instructions(), saved.as_ref())?;
+                    agent.reconfigure(open_agent(
+                        &settings,
+                        config.instructions(),
+                        saved.as_ref(),
+                    )?);
                 }
                 Err(error) => print_interactive_error(&error, true),
             }
