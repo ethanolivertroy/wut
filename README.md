@@ -1,40 +1,38 @@
 # wut
 
-A tiny, fast terminal assistant powered by Cerebras, Groq, or Vercel AI Gateway.
-Ask a quick question, recall a command, or let it inspect your current workspace.
-It cannot edit files or run commands.
-
-
+wut answers questions, recalls commands, and reads your workspace from the
+terminal. It uses Cerebras, Groq, or Vercel AI Gateway and cannot edit files or run commands.
 
 https://github.com/user-attachments/assets/2c1c2660-7630-4688-80a2-8beebeacf2c0
 
-
-
-Requires an API key for the selected provider:
-[Cerebras](https://cloud.cerebras.ai/), [Groq](https://console.groq.com/keys), or
-[Vercel AI Gateway](https://vercel.com/ai-gateway).
-
 ## Install
 
+Install with Cargo or npm:
+
 ```sh
-cargo install wut                      # anywhere with Rust 1.88 or newer
-npm install --global wut-cli           # anywhere with Node 18 or newer
+cargo install wut            # Rust 1.88 or newer
+npm install --global wut-cli # Node 18 or newer
 ```
 
-With Homebrew on macOS or Linux, which installs the prebuilt binary:
+Homebrew installs a prebuilt binary on macOS or Linux:
 
 ```sh
 brew tap ethanolivertroy/wut https://github.com/ethanolivertroy/wut
 brew install ethanolivertroy/wut/wut
 ```
 
-The installer works too, and it can save your Cerebras API key for you:
+Or use the shell installer, which can save your Cerebras API key:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanolivertroy/wut/main/install.sh | sh
 ```
 
-Save an API key with hidden terminal input:
+## Set up an API key
+
+Get a key for the provider you want to use:
+[Cerebras](https://cloud.cerebras.ai/), [Groq](https://console.groq.com/keys), or
+[Vercel AI Gateway](https://vercel.com/ai-gateway). Save it with one of these
+commands:
 
 ```sh
 wut --set-key cerebras
@@ -42,39 +40,38 @@ wut --set-key groq
 wut --set-key ai-gateway
 ```
 
-Run `wut --set-key` to choose a provider, or use **API key** in
-`wut --settings` for the selected model's provider. Never put the key itself in
-the command. Only the selected provider's key is required; package managers do
-not save one automatically.
+wut hides your input as you type. Enter the key at the prompt; never put the key
+itself in the command. Run `wut --set-key` to choose a provider, or select
+**API key** in `wut --settings` to set the current model's provider key.
 
-Saved keys are **plaintext, not encrypted or stored in an OS keychain**.
-Cerebras uses `~/.config/wut/credentials`, Groq uses
-`~/.config/wut/groq/credentials`, and AI Gateway uses
-`~/.config/wut/ai-gateway/credentials`. Paths use `$XDG_CONFIG_HOME` in place of
-`~/.config` when it is set. Saving writes the key atomically with mode `0600`
-and sets the credential directories to `0700`. Loading rejects unsafe permissions
-or ownership, symlinks, and hard-linked credential files. Re-entering a key with
-`--set-key` can replace an owned regular file and repair overly broad permissions;
-ordinary loading does not modify existing files. On macOS, credential files and
-directories must also have no extended ACL entries.
+You need only the key for your selected provider. Cargo, npm, and Homebrew do
+not save a key automatically. The shell installer can prompt for a Cerebras key.
+See [Saved credentials](#saved-credentials) for storage details.
 
-Set `CEREBRAS_API_KEY`, `GROQ_API_KEY`, or `AI_GATEWAY_API_KEY` in the process
-environment to avoid saving a key through wut. Environment credentials take
-priority over saved credentials for that provider.
+To keep your key in the process environment instead, set `CEREBRAS_API_KEY`,
+`GROQ_API_KEY`, or `AI_GATEWAY_API_KEY`. Each provider uses its own credentials;
+environment credentials take priority over saved credentials for that provider.
 
-Provider streams are limited to 1 MiB per line, 16 MiB per response, and 128
-tool-call slots. Over-limit or invalid streams fail without saving a completed
-turn. Diagnostics show terminal control characters as visible escape text.
+## Use
 
-Local JSON reads accept regular files, including symlinks to regular files,
-and reject pipes or devices without waiting for data. Size limits are 1 MiB for
-config, 64 MiB per saved session, and 8 KiB for the update cache. Oversized saves
-fail without replacing previously saved data. Unreadable sessions are skipped
-with a warning so the remaining history stays accessible.
+```sh
+wut "why is this broken?" # ask a question
+cat log | wut "why?"     # ask about piped input
+wut                      # start a chat
+wut -c                   # continue a chat
+wut --sessions           # browse history
+wut --settings           # configure defaults
+```
 
-For Groq, run `wut --set-key groq` or set `GROQ_API_KEY` in the process
-environment. Groq never uses your Cerebras key or its saved credentials file.
-Choose a model in `wut --settings`, or pass its ID before a question:
+In a chat, press Ctrl-C to stop the current answer. Press Ctrl-D, or Ctrl-C on an
+empty line, to exit.
+
+wut displays paragraphs as they stream and renders code blocks and diagrams
+when each block is complete.
+
+### Choose a model
+
+Choose a default model in `wut --settings`, or pass a model ID with your question:
 
 ```sh
 wut --models
@@ -82,98 +79,154 @@ wut --model groq:openai/gpt-oss-20b "how do I find the process on port 3000?"
 wut --model gpt-oss-120b --reasoning low "why is this failing?"
 ```
 
-The Groq choices are GPT-OSS 20B and 120B, both with low reasoning by default.
-`--reasoning medium` or `high` spends more time thinking; `auto` uses the optional
-TypeSafe integration. Command-line model choices leave your saved defaults
-unchanged. A continued chat remembers its model unless you override it.
+A model chosen on the command line applies to that chat and leaves your saved
+defaults unchanged. When you continue a chat, wut keeps its model unless you
+choose another.
 
-For DeepSeek V4.1 Flash 1017 Fast or Ultrafast through Vercel AI Gateway, run
+Groq offers GPT-OSS 20B and 120B, both with low reasoning by default. Use
+`--reasoning medium` or `--reasoning high` for more thinking, or `--reasoning auto`
+to let the optional [TypeSafe integration](#automatic-triage-with-typesafe) choose.
+
+Vercel AI Gateway offers DeepSeek V4.1 Flash 1017 Fast and Ultrafast. Run
 `wut --set-key ai-gateway` or set `AI_GATEWAY_API_KEY`, then choose a DeepSeek
-model in `wut --settings`. `wut --models` lists the available model IDs.
+model in `wut --settings`. Use `wut --models` to list available model IDs.
 
-Cerebras has archived Gemma 4 31B. Existing Gemma defaults and saved chats use
-GPT-OSS 120B on Cerebras instead; its unsupported `none` reasoning level becomes
-`low`. An explicit request for the archived model reports current replacements.
-
-Use `wut --benchmark --model groq:openai/gpt-oss-20b` to send three small test
-requests and emit JSON lines with `first_text_ms`, `total_ms`, and `output_chars`.
-Without `--model`, it tries the catalog and reports unavailable credentials or
-failed requests explicitly. Each test request has a 15-second deadline. This
-measures direct inference with streaming, without triage or workspace tools;
-first-text latency includes any model reasoning before visible text. It does
-not equate provider-advertised token throughput with response latency.
-
-A [live run from zero](evals/inference/2026-11-08-zero.json) records the raw
-samples and successful answer/workspace-read checks. Results depend on the
-prompt, reasoning level, network, and provider load.
+Cerebras has archived Gemma 4 31B. wut switches existing Gemma defaults and
+saved chats to GPT-OSS 120B on Cerebras and replaces the unsupported `none`
+reasoning level with `low`. If you request the archived model explicitly, wut
+lists current replacements.
 
 Model IDs and protocol options were checked against the
 [Groq model catalog](https://console.groq.com/docs/models),
 [Groq reasoning guide](https://console.groq.com/docs/reasoning), and
 [Cerebras catalog](https://inference-docs.cerebras.ai/models/overview).
 
-Set `EXA_API_KEY` to optionally give wut fast web search. Without it, wut runs
-normally with no Exa dependency. Once a question has read file contents, wut
-refuses web searches for the rest of that question, so a search query can't
-carry your files off the machine.
+### JSON output
 
-Workspace tools read only regular text files up to 512 KiB. Secret paths such as
-`.env` and `.ssh` are blocked even when they are symlinks to ordinary-looking
-files or directories.
+Include `Return only JSON` or a similar directive in your question to get raw,
+validated JSON, even in a terminal. wut can strip a complete JSON code fence
+without changing the enclosed value.
 
-Glob patterns for `find` and the `grep` file filter are compiled once per search
-and limited to 512 bytes. `*` stays within one path component. Repeated wildcards
-use a non-backtracking matcher instead of recursively trying every combination.
-`grep` walks files as needed and stops at 200 matching lines. Workspace walks
-and directory listings scan at most 20,000 entries; listings and text results
-are truncated to 32 KiB plus a limit notice.
+If a draft mixes prose with JSON, wut makes at most one formatting request in
+JSON mode, with tools disabled. If validation fails, wut reports an error and
+withholds the malformed document. It checks JSON syntax, not the accuracy of
+values or compliance with your schema.
 
-Set `TYPESAFE_API_KEY` to optionally let [TypeSafe](https://docs.typesafe.ai)'s
-Jev model triage each question before it reaches the answer model. One fast System One
-request judges whether the question needs the workspace tools, whether it needs
-web search, and how much thinking it calls for. wut drops tools only when Jev
-is confident they are unnecessary, and a TypeSafe failure or an answer slower
-than two seconds falls back to the normal behavior. To let Jev also choose the
-reasoning level per question, pick `Auto` under Reasoning in `wut --settings`.
-Without the key, wut runs normally with no TypeSafe dependency.
-[`evals/README.md`](evals/README.md) explains how to measure triage on labeled
-questions.
+### Diagrams
 
-## Use
+wut uses Mermaid diagrams to explain flows, sequences, and architectures.
+In terminals that support the Kitty graphics protocol—Rex, Ghostty, Kitty, and
+WezTerm—it renders diagrams inline with [Pele](https://pele.run). When you pipe
+output or use another terminal, wut returns Mermaid text.
+
+Set `WUT_IMAGES=0` to turn diagrams off, or `WUT_IMAGES=1` to enable them in a
+terminal wut does not recognize.
+
+wut rasterizes diagrams to fit the display width. If an image exceeds the
+16 MiB pixel-buffer limit, wut displays Mermaid text instead. It renders vector
+shapes and labels but blocks diagram references to local files and embedded
+images.
+
+## Optional integrations
+
+### Web search with Exa
+
+Set `EXA_API_KEY` to enable web search. Once wut reads file contents for a
+question, it blocks web searches for the rest of that question to keep those
+contents out of search queries. Without the key, wut runs without Exa.
+
+### Automatic triage with TypeSafe
+
+Set `TYPESAFE_API_KEY` to let [TypeSafe](https://docs.typesafe.ai)'s Jev model
+assess each question before it reaches the answer model. In one System One request,
+Jev decides whether the question needs workspace tools or web search and how
+much reasoning it needs.
+
+wut omits tools only when Jev is confident the question does not need them.
+If TypeSafe fails or takes more than two seconds, wut proceeds as usual.
+Without the key, wut runs without TypeSafe.
+
+To let Jev choose the reasoning level for each question, select `Auto` under
+Reasoning in `wut --settings`. The [triage evaluation guide](evals/README.md)
+explains how to measure triage on labeled questions.
+
+## Privacy and limits
+
+### Saved credentials
+
+Saved keys are **plaintext, not encrypted or stored in an OS keychain**.
+Each provider has a separate credential file:
+
+| Provider | Credential file |
+| --- | --- |
+| Cerebras | `~/.config/wut/credentials` |
+| Groq | `~/.config/wut/groq/credentials` |
+| Vercel AI Gateway | `~/.config/wut/ai-gateway/credentials` |
+
+If you set `XDG_CONFIG_HOME`, wut uses it in place of `~/.config`. Saving writes
+the key atomically with mode `0600` and sets credential directories to `0700`.
+
+wut rejects unsafe permissions or ownership, symlinks, and hard-linked
+credential files. On macOS, credential files and directories must also have no
+extended ACL entries. Re-entering a key with `--set-key` can replace an owned
+regular file and repair overly broad permissions. Loading credentials leaves
+existing files unchanged.
+
+### Workspace reads
+
+Workspace tools read only regular text files up to 512 KiB. wut blocks secret
+paths such as `.env` and `.ssh`, even when a symlink makes the file or directory
+appear under another name.
+
+Searches have these limits:
+
+| Search | Limit |
+| --- | --- |
+| Glob pattern for `find` or the `grep` file filter | 512 bytes |
+| `grep` results | 200 matching lines |
+| Workspace walk or directory listing | 20,000 entries |
+| Listing or text result | 32 KiB plus a limit notice |
+
+wut compiles glob patterns once per search. `*` matches within one path
+component; repeated wildcards use a non-backtracking matcher. `grep` reads files
+as needed and stops when it reaches the result limit.
+
+### Local data and provider responses
+
+Local JSON reads accept regular files, including symlinks to regular files.
+They reject pipes and devices without waiting for data.
+
+| Local data | Size limit |
+| --- | --- |
+| Config | 1 MiB |
+| Saved session | 64 MiB per session |
+| Update cache | 8 KiB |
+
+If a save exceeds its limit, wut preserves the previous data. If it cannot read
+a session, it warns you and skips that session, keeping the rest of your history
+accessible.
+
+wut limits provider streams to 1 MiB per line, 16 MiB per response, and 128
+tool-call slots. It rejects invalid or over-limit streams without saving a
+completed turn. Diagnostics display terminal control characters as visible
+escape text.
+
+## Benchmarks
+
+Run three small test requests to measure response latency:
 
 ```sh
-wut "why is this broken?" # ask
-cat log | wut "why?"      # ask about piped input
-wut                       # chat
-wut -c                    # continue
-wut --sessions            # history
-wut --settings            # configure
+wut --benchmark --model groq:openai/gpt-oss-20b
 ```
 
-In a chat, Ctrl-C stops the current answer; Ctrl-D or Ctrl-C on an empty line
-exits.
+The benchmark writes JSON lines with `first_text_ms`, `total_ms`, and
+`output_chars`. Without `--model`, it tries the catalog and reports missing
+credentials or failed requests. Each request has a 15-second deadline.
 
-Ordinary paragraphs appear as they stream, without waiting for a newline.
-Code blocks and diagrams retain their complete-block rendering.
+The benchmark measures direct streaming inference without triage or workspace
+tools. First-text latency includes any reasoning before visible text;
+provider-advertised token throughput does not measure response latency.
 
-Explicit JSON-only directives such as `Return only JSON` select validated raw
-output, including in a terminal. A complete JSON code fence can be removed
-without changing its value. If a draft mixes prose with JSON, wut makes at most
-one tool-free JSON-mode formatting request; if that fails validation, it reports
-an error without printing a malformed document. This checks JSON syntax, not the
-correctness of its values or adherence to a user-provided schema.
-
-## Diagrams
-
-In terminals that show images through the Kitty graphics protocol (Rex,
-Ghostty, Kitty, WezTerm), wut draws diagrams: when a flow, a sequence or an
-architecture is easier to see than to read, the answer includes a Mermaid
-diagram and wut renders it inline with [Pele](https://pele.run). Piped output
-and other terminals get the Mermaid text instead. Set `WUT_IMAGES=0` to turn
-diagrams off, or `WUT_IMAGES=1` to turn them on in a terminal wut doesn't
-recognize.
-
-Diagrams are rasterized to fit their display width, with a 16 MiB pixel-buffer
-limit. Oversized images fall back to Mermaid text. Diagram image references
-cannot load local files or embedded images; ordinary vector shapes and labels
-continue to render.
+A [live run from zero](evals/inference/2026-11-08-zero.json) records raw samples
+and successful checks of answers and workspace reads. Results depend on the
+prompt, reasoning level, network, and provider load.
