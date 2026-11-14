@@ -25,9 +25,14 @@ pub struct Agent {
     model: String,
     effort: Option<String>,
     auto_effort: bool,
-    triage: Option<typesafe::Client>,
-    notice: Option<Error>,
+    triage: Triage,
     messages: Vec<Message>,
+}
+
+enum Triage {
+    Unconfigured,
+    Active(typesafe::Client),
+    Disabled { notice: Option<Error> },
 }
 
 impl Agent {
@@ -62,10 +67,16 @@ impl Agent {
             model,
             effort,
             auto_effort,
-            triage: typesafe::Client::from_env(),
-            notice: None,
+            triage: typesafe::Client::from_env().map_or(Triage::Unconfigured, Triage::Active),
             messages,
         })
+    }
+
+    /// Model and instruction changes keep the process's triage health and
+    /// any warning that has not yet been displayed.
+    pub fn reconfigure(&mut self, mut replacement: Self) {
+        replacement.triage = std::mem::replace(&mut self.triage, Triage::Unconfigured);
+        *self = replacement;
     }
 
     pub fn ask(
@@ -86,7 +97,10 @@ impl Agent {
     /// A one-time warning raised while answering, such as TypeSafe rejecting
     /// its API key. Callers print it once the answer is on screen.
     pub fn take_notice(&mut self) -> Option<Error> {
-        self.notice.take()
+        match &mut self.triage {
+            Triage::Disabled { notice } => notice.take(),
+            Triage::Unconfigured | Triage::Active(_) => None,
+        }
     }
 
     /// Saved with the answer so continued Gateway tool requests can replay it.
@@ -159,7 +173,7 @@ impl Agent {
     /// Asks Jev what this question needs. Any failure falls back to offering
     /// every tool with the configured effort, so triage can only speed wut up.
     fn plan(&mut self, question: &str, root: &Path) -> Plan {
-        let Some(client) = &self.triage else {
+        let Triage::Active(client) = &self.triage else {
             return Plan::default();
         };
         let exchanges = recent_exchanges(&self.messages, TRIAGE_EXCHANGES);
@@ -167,8 +181,9 @@ impl Agent {
             Ok(plan) => plan,
             Err(failure) => {
                 if failure.permanent {
-                    self.triage = None;
-                    self.notice = Some(failure.error.context("TypeSafe triage disabled"));
+                    self.triage = Triage::Disabled {
+                        notice: Some(failure.error.context("TypeSafe triage disabled")),
+                    };
                 }
                 Plan::default()
             }
@@ -378,11 +393,15 @@ mod tests {
     /// Serves one canned SSE body per request, in order, and returns the
     /// base URL plus a handle yielding the request bodies it saw.
     fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        serve_http(responses.into_iter().map(|body| (200, body)).collect())
+    }
+
+    fn serve_http(responses: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for body in responses {
+            for (status, body) in responses {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut length = 0;
@@ -402,7 +421,7 @@ mod tests {
                 let mut stream = reader.into_inner();
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();
@@ -435,8 +454,7 @@ mod tests {
             model: "gpt-oss-120b".to_owned(),
             effort: None,
             auto_effort: false,
-            triage: None,
-            notice: None,
+            triage: super::Triage::Unconfigured,
             messages: Vec::new(),
         };
         let root = std::env::temp_dir();
@@ -469,10 +487,55 @@ mod tests {
             model: "gpt-oss-120b".to_owned(),
             effort: None,
             auto_effort: false,
-            triage: None,
-            notice: None,
+            triage: super::Triage::Unconfigured,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn permanent_triage_failures_survive_settings_changes_and_warn_once() {
+        for status in [401, 403, 422] {
+            let (base, server) = serve_http(vec![(status, "{}".to_owned())]);
+            let mut agent = test_agent(&base);
+            agent.triage = super::Triage::Active(crate::typesafe::Client::for_test(&base));
+            let root = tempdir();
+            assert_eq!(agent.plan("hello", &root), crate::triage::Plan::default());
+            assert_eq!(server.join().unwrap().len(), 1);
+
+            let mut replacement = test_agent(&base);
+            replacement.triage = super::Triage::Active(crate::typesafe::Client::for_test(&base));
+            replacement.model = "groq:openai/gpt-oss-20b".to_owned();
+            agent.reconfigure(replacement);
+            assert_eq!(agent.model, "groq:openai/gpt-oss-20b");
+            assert!(matches!(agent.triage, super::Triage::Disabled { .. }));
+            assert!(agent.take_notice().unwrap().message().contains("disabled"));
+            agent.reconfigure(test_agent(&base));
+            assert!(matches!(agent.triage, super::Triage::Disabled { .. }));
+            assert!(agent.take_notice().is_none());
+            assert_eq!(agent.plan("again", &root), crate::triage::Plan::default());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn temporary_triage_failures_remain_retryable_after_settings_changes() {
+        let (base, server) = serve_http(vec![
+            (503, "{}".to_owned()),
+            (
+                200,
+                r#"{"answers":{"needs_workspace_files":{"type":"noul","noul":0.0}}}"#.to_owned(),
+            ),
+        ]);
+        let mut agent = test_agent(&base);
+        agent.triage = super::Triage::Active(crate::typesafe::Client::for_test(&base));
+        let root = tempdir();
+        assert_eq!(agent.plan("hello", &root), crate::triage::Plan::default());
+        assert!(agent.take_notice().is_none());
+        agent.reconfigure(test_agent(&base));
+        assert!(matches!(agent.triage, super::Triage::Active(_)));
+        assert!(!agent.plan("again", &root).tools.workspace);
+        assert_eq!(server.join().unwrap().len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

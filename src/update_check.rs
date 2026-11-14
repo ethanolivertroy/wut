@@ -19,25 +19,30 @@ struct Cache {
     last_notified: Option<String>,
 }
 
-pub struct Check {
-    notice: Option<String>,
-    notification: Option<(PathBuf, String)>,
+pub enum Check {
+    Inactive,
+    Pending {
+        path: PathBuf,
+        version: String,
+        message: String,
+    },
 }
 
 impl Check {
     pub fn start(enabled: bool) -> Self {
         if !enabled {
-            return Self::disabled();
+            return Self::Inactive;
         }
         let Some(cache_path) = cache_path() else {
-            return Self::disabled();
+            return Self::Inactive;
         };
         let now = now();
         let cache = read_cache(&cache_path).unwrap_or_default();
         if let Some(notice) = notice_for(&cache) {
-            return Self {
-                notice: Some(notice),
-                notification: Some((cache_path, cache.latest.unwrap_or_default())),
+            return Self::Pending {
+                path: cache_path,
+                version: cache.latest.unwrap_or_default(),
+                message: notice,
             };
         }
         if begin_refresh(&cache_path, &cache, now)
@@ -45,23 +50,28 @@ impl Check {
         {
             let _ = spawn_refresh_process(&executable);
         }
-        Self {
-            notice: None,
-            notification: None,
-        }
+        Self::Inactive
     }
 
-    pub fn notice(self) -> Option<String> {
-        if let Some((path, version)) = self.notification {
-            mark_notified(&path, &version).ok()?;
-        }
-        self.notice
+    /// An advisory is delivered only after a successful command. Record it
+    /// after writing, so a failed command or output keeps it pending.
+    pub fn finish(self, succeeded: bool) {
+        self.finish_to(succeeded, &mut io::stderr().lock());
     }
 
-    fn disabled() -> Self {
-        Self {
-            notice: None,
-            notification: None,
+    fn finish_to(self, succeeded: bool, output: &mut impl io::Write) {
+        if succeeded
+            && let Self::Pending {
+                path,
+                version,
+                message,
+            } = self
+            && writeln!(output, "{message}")
+                .and_then(|()| output.flush())
+                .is_ok()
+        {
+            // A cache failure must not hide a notice that can be displayed.
+            let _ = mark_notified(&path, &version);
         }
     }
 }
@@ -169,4 +179,122 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "wut-update-test-{}-{}-{}",
+                std::process::id(),
+                now(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            let fixture = Self(path);
+            write_cache(
+                &fixture.path(),
+                &Cache {
+                    checked_at: 42,
+                    latest: Some("999.0.0".to_owned()),
+                    last_notified: None,
+                },
+            )
+            .unwrap();
+            fixture
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("update.json")
+        }
+
+        fn check(&self) -> Check {
+            let cache = read_cache(&self.path()).unwrap();
+            Check::Pending {
+                path: self.path(),
+                message: notice_for(&cache).unwrap(),
+                version: cache.latest.unwrap(),
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn failed_commands_leave_the_update_notice_pending() {
+        let fixture = Fixture::new();
+        let before = fs::read(fixture.path()).unwrap();
+        let mut output = Vec::new();
+        fixture.check().finish_to(false, &mut output);
+        assert!(output.is_empty());
+        assert_eq!(fs::read(fixture.path()).unwrap(), before);
+        assert!(notice_for(&read_cache(&fixture.path()).unwrap()).is_some());
+    }
+
+    #[test]
+    fn delivered_notices_are_not_repeated() {
+        let fixture = Fixture::new();
+        let mut output = Vec::new();
+        fixture.check().finish_to(true, &mut output);
+        assert!(String::from_utf8(output).unwrap().contains("wut 999.0.0"));
+        let cache = read_cache(&fixture.path()).unwrap();
+        assert_eq!(cache.last_notified.as_deref(), Some("999.0.0"));
+        assert_eq!(cache.checked_at, 42);
+        assert!(notice_for(&cache).is_none());
+    }
+
+    struct FailedOutput {
+        on_flush: bool,
+    }
+
+    impl io::Write for FailedOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.on_flush {
+                Ok(bytes.len())
+            } else {
+                Err(io::Error::other("output failed"))
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn failed_writes_and_flushes_do_not_consume_notices() {
+        for on_flush in [false, true] {
+            let fixture = Fixture::new();
+            let before = fs::read(fixture.path()).unwrap();
+            fixture
+                .check()
+                .finish_to(true, &mut FailedOutput { on_flush });
+            assert_eq!(fs::read(fixture.path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn cache_errors_do_not_hide_a_displayable_notice() {
+        let fixture = Fixture::new();
+        let check = fixture.check();
+        fs::remove_file(fixture.path()).unwrap();
+        fs::remove_dir(&fixture.0).unwrap();
+        fs::write(&fixture.0, b"not a directory").unwrap();
+        let mut output = Vec::new();
+        check.finish_to(true, &mut output);
+        assert!(String::from_utf8(output).unwrap().contains("wut 999.0.0"));
+        fs::remove_file(&fixture.0).unwrap();
+    }
 }
