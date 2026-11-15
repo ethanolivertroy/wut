@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { after, before, beforeEach, test } = require('node:test');
 
 const release = require('../lib/release.js');
@@ -229,4 +229,94 @@ test('a failed download preserves an existing cached binary', async () => {
   await assert.rejects(release.downloadBinary(), /HTTP 503/);
   assert.deepEqual(fs.readFileSync(binary), before);
   assert.deepEqual(fs.readdirSync(process.env.WUT_NPM_CACHE_DIR), [VERSION_TEXT]);
+});
+
+test('custom cache roots are used for both download and lookup', async () => {
+  publishRelease();
+  const target = path.join(workspace, 'custom cache');
+  const binary = await release.ensureBinary({ target });
+  assert.equal(binary, release.binaryPath(VERSION_TEXT, target));
+  assert.ok(fs.existsSync(binary));
+  assert.equal(fs.existsSync(release.binaryPath()), false);
+});
+
+test('concurrent installations publish complete binaries and preserve other cache files', async () => {
+  publishRelease();
+  const binary = await release.ensureBinary();
+  const marker = path.join(path.dirname(binary), 'keep');
+  fs.writeFileSync(marker, 'another cache user');
+  await Promise.all([release.downloadBinary(), release.downloadBinary()]);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'another cache user');
+  assert.equal(spawnSync(binary, ['--version'], { encoding: 'utf8' }).stdout.trim(), VERSION_TEXT);
+  assert.ok(fs.readdirSync(process.env.WUT_NPM_CACHE_DIR).every(name => !name.startsWith('.staging-')));
+});
+
+test('publication failure preserves the existing cached binary', async () => {
+  publishRelease();
+  const binary = await release.ensureBinary();
+  const before = fs.readFileSync(binary);
+  const rename = fs.renameSync;
+  fs.renameSync = () => { throw new Error('fixture rename failure'); };
+  try {
+    await assert.rejects(release.downloadBinary(), /fixture rename failure/);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.deepEqual(fs.readFileSync(binary), before);
+  assert.deepEqual(fs.readdirSync(process.env.WUT_NPM_CACHE_DIR), [VERSION_TEXT]);
+});
+
+test('the npm launcher preserves child signal termination', () => {
+  const binary = release.binaryPath();
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, '#!/bin/sh\nkill -TERM "$$"\n');
+  fs.chmodSync(binary, 0o755);
+  const run = spawnSync(process.execPath, [path.join(__dirname, '../bin/wut.js')], {
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  assert.equal(run.error, undefined);
+  assert.equal(run.signal, 'SIGTERM');
+});
+
+test('the npm launcher forwards repeated signals until the child exits', async () => {
+  const binary = release.binaryPath();
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, `#!${process.execPath}
+let count = 0;
+process.on('SIGTERM', () => {
+  process.stdout.write('signal' + (++count) + '\\n');
+  if (count === 2) process.exit(0);
+});
+process.stdout.write('ready\\n');
+setTimeout(() => process.exit(99), 3000);
+`);
+  fs.chmodSync(binary, 0o755);
+  const child = spawn(process.execPath, [path.join(__dirname, '../bin/wut.js')], {
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let transcript = '';
+  child.stdout.on('data', chunk => { transcript += chunk; });
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  const until = async marker => {
+    const deadline = Date.now() + 2000;
+    while (!transcript.includes(marker)) {
+      assert.ok(Date.now() < deadline, `missing ${marker}: ${transcript}`);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+  try {
+    await until('ready');
+    child.kill('SIGTERM');
+    await until('signal1');
+    child.kill('SIGTERM');
+    assert.deepEqual(await exited, { code: 0, signal: null });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
 });

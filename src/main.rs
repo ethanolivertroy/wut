@@ -335,20 +335,22 @@ fn run_one_shot(
         instructions,
         history,
     )?;
-    let answer = run_turn(
+    run_turn(
         &mut agent,
         &question.prompt,
         &cwd,
         decorate,
         settings.response_color,
-    )?;
-    record_turn(
-        &mut saved,
-        settings,
-        &cwd,
-        &question.saved,
-        answer,
-        question.reasoning_to_save(agent.last_reasoning()),
+        &mut |answer, reasoning| {
+            record_turn(
+                &mut saved,
+                settings,
+                &cwd,
+                &question.saved,
+                answer.to_owned(),
+                question.reasoning_to_save(reasoning),
+            )
+        },
     )?;
     Ok(())
 }
@@ -384,21 +386,24 @@ fn run_interactive(
             return Ok(());
         };
         let question = Question::plain(input.trim());
-        let answer = run_turn(
+        return run_turn(
             &mut agent,
             &question.prompt,
             &cwd,
             decorate,
             settings.response_color,
-        )?;
-        return record_turn(
-            &mut saved,
-            &settings,
-            &cwd,
-            &question.saved,
-            answer,
-            question.reasoning_to_save(agent.last_reasoning()),
-        );
+            &mut |answer, reasoning| {
+                record_turn(
+                    &mut saved,
+                    &settings,
+                    &cwd,
+                    &question.saved,
+                    answer.to_owned(),
+                    question.reasoning_to_save(reasoning),
+                )
+            },
+        )
+        .map(|_| ());
     }
 
     cancel::install();
@@ -427,14 +432,24 @@ fn run_interactive(
             continue;
         }
 
-        let answer = match run_turn(
+        match run_turn(
             &mut agent,
             question,
             &cwd,
             decorate,
             settings.response_color,
+            &mut |answer, reasoning| {
+                record_turn(
+                    &mut saved,
+                    &settings,
+                    &cwd,
+                    question,
+                    answer.to_owned(),
+                    reasoning,
+                )
+            },
         ) {
-            Ok(answer) => answer,
+            Ok(_) => {}
             Err(_) if cancel::requested() => {
                 eprintln!("{}", dim("cancelled", decorate));
                 eprintln!();
@@ -444,18 +459,10 @@ fn run_interactive(
                 print_interactive_error(&error, true);
                 continue;
             }
-        };
+        }
         if decorate {
             eprintln!();
         }
-        record_turn(
-            &mut saved,
-            &settings,
-            &cwd,
-            question,
-            answer,
-            agent.last_reasoning(),
-        )?;
     }
 
     Ok(())
@@ -495,19 +502,27 @@ fn run_turn(
     cwd: &std::path::Path,
     decorate: bool,
     response_color: config::ResponseColor,
+    on_finish: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
 ) -> Result<String> {
     cancel::reset();
     let json_only = response_format::json_only(question);
-    let output = std::cell::RefCell::new(TurnOutput::new(decorate && !json_only, response_color));
+    let output = std::cell::RefCell::new(Some(TurnOutput::new(
+        decorate && !json_only,
+        response_color,
+    )));
     let spinner_enabled = decorate && spinner::enabled();
     let spinner = std::cell::RefCell::new(spinner::Spinner::start(spinner_enabled));
     let show_tools = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    let answer = agent.ask(
+    let answer = agent.ask_with_finish(
         question,
         cwd,
         &mut |delta| {
             spinner.borrow_mut().stop();
-            output.borrow_mut().push(delta)
+            output
+                .borrow_mut()
+                .as_mut()
+                .expect("output is active")
+                .push(delta)
         },
         // Every tool call is shown, so a reply never reads files or searches
         // the web out of sight.
@@ -516,33 +531,43 @@ fn run_turn(
             // Whatever streamed before the first tool call of a round was
             // the model narrating its next step, so set it apart from the
             // answer. Later calls in the round find nothing left to dim.
-            let _ = output.borrow_mut().dim_round();
+            output
+                .borrow_mut()
+                .as_mut()
+                .expect("output is active")
+                .dim_round()?;
             if show_tools {
+                use std::io::Write;
                 let mut spinner = spinner.borrow_mut();
-                eprintln!("{}", dim(&format!("· {call}"), decorate));
+                writeln!(
+                    std::io::stderr().lock(),
+                    "{}",
+                    dim(&format!("· {call}"), decorate)
+                )
+                .map_err(|error| Error::terminal("could not display tool call", error))?;
                 *spinner = spinner::Spinner::start(spinner_enabled);
             }
+            Ok(())
+        },
+        &mut |answer, reasoning| {
+            spinner.borrow_mut().stop();
+            let output = output.borrow_mut().take().expect("output is active");
+            if decorate && json_only {
+                output.finish(&response_format::terminal_json(answer))?;
+            } else {
+                output.finish(answer)?;
+            }
+            cancel::check()?;
+            on_finish(answer, reasoning)
         },
     );
     spinner.borrow_mut().stop();
-    let output = output.into_inner();
+    if let Some(output) = output.into_inner() {
+        // Finish partial output after an unsuccessful model request.
+        let _ = output.finish("");
+    }
     let notice = agent.take_notice();
-    let result = match answer {
-        Ok(answer) => {
-            let finished = if decorate && json_only {
-                output.finish(&response_format::terminal_json(&answer))
-            } else {
-                output.finish(&answer)
-            };
-            finished.map(|()| answer)
-        }
-        Err(error) => {
-            // End any partly streamed answer on its own line before the
-            // error, or the next prompt would start mid-line.
-            let _ = output.finish("");
-            Err(error)
-        }
-    };
+    let result = answer;
     if let Some(notice) = notice {
         if decorate && result.is_ok() {
             eprintln!();
@@ -580,14 +605,45 @@ fn record_turn(
     answer: String,
     reasoning: Option<&str>,
 ) -> Result<()> {
-    let stored = saved.get_or_insert_with(|| {
-        let provider = cerebras::find_model(cerebras::resolve_model(settings.model.as_deref()))
-            .map_or(cerebras::Provider::Cerebras, |model| model.provider);
-        state::Session::new(provider.id(), new_session_id(), cwd)
-    });
-    stored.settings = Some(session_settings(settings));
-    stored.add_turn(question, answer, reasoning.map(str::to_owned));
-    state::save(stored)
+    persist_turn(
+        saved,
+        || {
+            let provider = cerebras::find_model(cerebras::resolve_model(settings.model.as_deref()))
+                .map_or(cerebras::Provider::Cerebras, |model| model.provider);
+            state::Session::new(provider.id(), new_session_id(), cwd)
+        },
+        state::Turn {
+            user: question.to_owned(),
+            assistant: answer,
+            reasoning: reasoning.map(str::to_owned),
+        },
+        session_settings(settings),
+        state::save,
+    )
+}
+
+fn persist_turn(
+    saved: &mut Option<state::Session>,
+    new_session: impl FnOnce() -> state::Session,
+    turn: state::Turn,
+    settings: state::SessionSettings,
+    save: impl FnOnce(&state::Session) -> Result<()>,
+) -> Result<()> {
+    let existed = saved.is_some();
+    let mut session = saved.take().unwrap_or_else(new_session);
+    let previous_settings = session.settings.replace(settings);
+    let previous_time = session.updated_at;
+    session.add_turn(&turn.user, turn.assistant, turn.reasoning);
+    let result = save(&session);
+    if result.is_err() {
+        session.turns.pop();
+        session.settings = previous_settings;
+        session.updated_at = previous_time;
+    }
+    if existed || result.is_ok() {
+        *saved = Some(session);
+    }
+    result
 }
 
 fn session_settings(settings: &Settings) -> state::SessionSettings {
@@ -771,6 +827,37 @@ mod tests {
         InteractiveCommand, Question, byte_count, parse_interactive_command, selection_after_delete,
     };
     use crate::prompt::is_command;
+    use crate::state;
+
+    #[test]
+    fn failed_session_saves_restore_existing_sessions_and_leave_new_ones_unsaved() {
+        for existed in [false, true] {
+            let make_session =
+                || state::Session::new("wut", "test".to_owned(), std::path::Path::new("/tmp"));
+            let mut saved = existed.then(make_session);
+            if let Some(session) = &mut saved {
+                session.add_turn("old", "kept".to_owned(), None);
+            }
+            let before = format!("{saved:?}");
+            let error = super::persist_turn(
+                &mut saved,
+                make_session,
+                state::Turn {
+                    user: "new".to_owned(),
+                    assistant: "unsaved".to_owned(),
+                    reasoning: None,
+                },
+                state::SessionSettings {
+                    model: Some("gpt-oss-120b".to_owned()),
+                    reasoning: None,
+                },
+                |_| Err(crate::error::Error::internal("disk full")),
+            )
+            .unwrap_err();
+            assert!(error.message().contains("disk full"));
+            assert_eq!(format!("{saved:?}"), before);
+        }
+    }
 
     #[test]
     fn model_override_uses_its_own_effort_without_changing_saved_defaults() {

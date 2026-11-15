@@ -373,10 +373,6 @@ fn draw(
         }
     }
 
-    if rows > 0 {
-        execute!(output, MoveUp(u16::try_from(rows).unwrap_or(u16::MAX)))
-            .map_err(|error| Error::terminal("could not draw prompt", error))?;
-    }
     let (cursor_row, column) = cursor_position(line, cursor, terminal_width);
     let end_row = cursor_position(line, line.len(), terminal_width)
         .0
@@ -507,5 +503,21 @@ impl Drop for TerminalInput {
         let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stderr(), DisableBracketedPaste);
         let _ = disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn showing_and_clearing_suggestions_does_not_move_above_the_prompt() {
+        for suggestions in [matching_commands("/s"), Vec::new()] {
+            let mut output = Vec::new();
+            draw(&mut output, "/s", 2, &suggestions, 0, 1, 0).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert_eq!(text.matches("\r\n").count(), 1);
+            assert_eq!(text.matches("\x1b[1A").count(), 1, "{text:?}");
+        }
     }
 }
