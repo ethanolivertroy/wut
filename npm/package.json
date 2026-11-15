@@ -1,6 +1,6 @@
 {
   "name": "wut-cli",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "A tiny, fast terminal assistant (installs the wut binary)",
   "bin": {
     "wut": "bin/wut.js"
