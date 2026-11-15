@@ -107,6 +107,7 @@ function requireTar() {
 
 async function downloadBinary({
   version = VERSION, asset = assetFor(),
+  target = cacheRoot(),
   timeoutMs = DOWNLOAD_TIMEOUT_MS, maxArchiveBytes = MAX_ARCHIVE_BYTES,
 } = {}) {
   const base = releaseBase(version);
@@ -140,9 +141,9 @@ async function downloadBinary({
   }
 
   requireTar();
-  fs.mkdirSync(cacheRoot(), { recursive: true });
-  const staging = fs.mkdtempSync(path.join(cacheRoot(), `.staging-${version}-`));
-  const target = path.join(cacheRoot(), version);
+  fs.mkdirSync(target, { recursive: true });
+  const staging = fs.mkdtempSync(path.join(target, `.staging-${version}-`));
+  const destination = path.join(target, version);
 
   try {
     const archivePath = path.join(staging, asset);
@@ -166,18 +167,19 @@ async function downloadBinary({
     fs.copyFileSync(binary, path.join(staged, 'wut'));
     fs.chmodSync(path.join(staged, 'wut'), 0o755);
 
-    if (fs.existsSync(target)) {
-      fs.rmSync(target, { recursive: true, force: true });
-    }
-    fs.renameSync(staged, target);
+    // Replace the file atomically on the same filesystem. Keep an existing
+    // cache entry available until publication succeeds, including when two
+    // launchers install the same version concurrently.
+    fs.mkdirSync(destination, { recursive: true });
+    fs.renameSync(path.join(staged, 'wut'), binaryPath(version, target));
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
   }
 
   if (process.env.WUT_NPM_VERBOSE) {
-    process.stderr.write(`wut: installed ${version} to ${target}\n`);
+    process.stderr.write(`wut: installed ${version} to ${destination}\n`);
   }
-  return target;
+  return destination;
 }
 
 // Download the binary once, then reuse it from the cache.
@@ -186,7 +188,7 @@ async function ensureBinary({ version = VERSION, force = false, target = cacheRo
   if (!force && fs.existsSync(binary)) {
     return binary;
   }
-  await downloadBinary({ version });
+  await downloadBinary({ version, target });
   if (!fs.existsSync(binary)) {
     throw new Error(`wut ${version} was not installed to ${binary}`);
   }

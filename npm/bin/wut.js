@@ -19,21 +19,37 @@ async function main() {
 
   const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' });
 
+  const forwarding = new Map();
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => {
-      if (!child.killed) {
+    const forward = () => {
+      // killed means a signal was sent, not that the child has exited.
+      if (child.exitCode === null && child.signalCode === null) {
         child.kill(signal);
       }
-    });
+    };
+    forwarding.set(signal, forward);
+    process.on(signal, forward);
   }
 
+  const stopForwarding = () => {
+    for (const [signal, forward] of forwarding) {
+      process.removeListener(signal, forward);
+    }
+  };
+
   child.on('error', (error) => {
+    stopForwarding();
     process.stderr.write(`wut: could not start ${binary}: ${error.message}\n`);
     process.exitCode = 1;
   });
 
   child.on('exit', (code, signal) => {
-    process.exitCode = code === null ? (signal ? 1 : 0) : code;
+    stopForwarding();
+    if (signal) {
+      process.kill(process.pid, signal);
+    } else {
+      process.exitCode = code === null ? 1 : code;
+    }
   });
 }
 

@@ -70,19 +70,25 @@ pub fn write_private(path: &Path, bytes: &[u8], subject: &str, max_bytes: usize)
         .unwrap_or_default()
         .as_nanos();
     let temporary = directory.join(format!(".{filename}.{}.{}.tmp", std::process::id(), nonce));
+    write_temporary(path, &temporary, bytes, subject)
+}
 
+fn write_temporary(path: &Path, temporary: &Path, bytes: &[u8], subject: &str) -> Result<()> {
+    let directory = parent_directory(path);
+    // Only enter cleanup after exclusive creation succeeds. A collision
+    // belongs to another writer and must never be removed.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temporary)
+        .map_err(|error| {
+            Error::new(
+                format!("could not create {subject}: {error}"),
+                format!("check '{}' permissions and try again", directory.display()),
+            )
+        })?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|error| {
-                Error::new(
-                    format!("could not create {subject}: {error}"),
-                    format!("check '{}' permissions and try again", directory.display()),
-                )
-            })?;
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
@@ -92,7 +98,7 @@ pub fn write_private(path: &Path, bytes: &[u8], subject: &str, max_bytes: usize)
                 )
             })?;
 
-        fs::rename(&temporary, path).map_err(|error| {
+        fs::rename(temporary, path).map_err(|error| {
             Error::new(
                 format!("could not save {subject}: {error}"),
                 format!("check '{}' permissions and try again", directory.display()),
@@ -186,5 +192,28 @@ mod tests {
         let missing = directory.0.join("missing/data.json");
         assert!(write_private(&missing, b"12345", "test data", 4).is_err());
         assert!(!directory.0.join("missing").exists());
+    }
+
+    #[test]
+    fn temporary_file_collisions_preserve_both_existing_files() {
+        let directory = Directory::new();
+        let path = directory.0.join("data.json");
+        let temporary = directory.0.join("occupied.tmp");
+        fs::write(&path, b"old data").unwrap();
+        fs::write(&temporary, b"another writer").unwrap();
+        assert!(write_temporary(&path, &temporary, b"new data", "test data").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old data");
+        assert_eq!(fs::read(&temporary).unwrap(), b"another writer");
+    }
+
+    #[test]
+    fn failed_renames_remove_only_the_owned_temporary_file() {
+        let directory = Directory::new();
+        let path = directory.0.join("destination");
+        let temporary = directory.0.join("owned.tmp");
+        fs::create_dir(&path).unwrap();
+        assert!(write_temporary(&path, &temporary, b"new data", "test data").is_err());
+        assert!(path.is_dir());
+        assert!(!temporary.exists());
     }
 }

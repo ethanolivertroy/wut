@@ -79,6 +79,7 @@ impl Agent {
         *self = replacement;
     }
 
+    #[cfg(test)]
     pub fn ask(
         &mut self,
         question: &str,
@@ -86,8 +87,29 @@ impl Agent {
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
         on_tool: &mut dyn FnMut(&str),
     ) -> Result<String> {
+        self.ask_with_finish(
+            question,
+            root,
+            on_delta,
+            &mut |call| {
+                on_tool(call);
+                Ok(())
+            },
+            &mut |_, _| Ok(()),
+        )
+    }
+
+    /// Commit history only after output and session persistence succeed.
+    pub fn ask_with_finish(
+        &mut self,
+        question: &str,
+        root: &Path,
+        on_delta: &mut dyn FnMut(&str) -> Result<()>,
+        on_tool: &mut dyn FnMut(&str) -> Result<()>,
+        on_finish: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
+    ) -> Result<String> {
         let checkpoint = self.messages.len();
-        let result = self.ask_inner(question, root, on_delta, on_tool);
+        let result = self.ask_inner(question, root, on_delta, on_tool, on_finish);
         if result.is_err() {
             self.messages.truncate(checkpoint);
         }
@@ -104,6 +126,7 @@ impl Agent {
     }
 
     /// Saved with the answer so continued Gateway tool requests can replay it.
+    #[cfg(test)]
     pub fn last_reasoning(&self) -> Option<&str> {
         self.messages
             .last()
@@ -115,7 +138,8 @@ impl Agent {
         question: &str,
         root: &Path,
         on_delta: &mut dyn FnMut(&str) -> Result<()>,
-        on_tool: &mut dyn FnMut(&str),
+        on_tool: &mut dyn FnMut(&str) -> Result<()>,
+        on_finish: &mut dyn FnMut(&str, Option<&str>) -> Result<()>,
     ) -> Result<String> {
         let plan = self.plan(question, root);
         let effort = self.turn_effort(plan.effort);
@@ -133,6 +157,7 @@ impl Agent {
                 effort.as_deref(),
                 &mut |delta| if json_only { Ok(()) } else { on_delta(delta) },
             )?;
+            crate::cancel::check()?;
             if outcome.tool_calls.is_empty() {
                 if outcome.content.trim().is_empty() {
                     return Err(Error::new(
@@ -152,6 +177,8 @@ impl Agent {
                     };
                     on_delta(&outcome.content)?;
                 }
+                crate::cancel::check()?;
+                on_finish(&outcome.content, outcome.reasoning.as_deref())?;
                 // Keep only the question and the answer. The tool calls and
                 // their results would otherwise be sent again with every
                 // later question, and a saved session drops them anyway.
@@ -206,7 +233,7 @@ impl Agent {
         &mut self,
         outcome: Outcome,
         root: &Path,
-        on_tool: &mut dyn FnMut(&str),
+        on_tool: &mut dyn FnMut(&str) -> Result<()>,
         read_files: &mut bool,
     ) -> Result<()> {
         let mut assistant = Message::text(Role::Assistant, outcome.content);
@@ -221,12 +248,12 @@ impl Agent {
             // read file contents a query could carry them out, for example
             // when a file holds a prompt injection. Refuse the search instead.
             if call.name == "web_search" && *read_files {
-                on_tool(&format!("{description} (blocked: files were read)"));
+                on_tool(&format!("{description} (blocked: files were read)"))?;
                 self.messages
                     .push(Message::tool_result(call.id, WEB_SEARCH_BLOCKED.to_owned()));
                 continue;
             }
-            on_tool(&description);
+            on_tool(&description)?;
             if tools::reads_contents(&call.name) {
                 *read_files = true;
             }
@@ -490,6 +517,62 @@ mod tests {
             triage: super::Triage::Unconfigured,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn failed_output_or_persistence_rolls_back_history_before_the_next_question() {
+        let (base, server) = serve(vec![
+            sse(&[r#"{"choices":[{"delta":{"content":"kept answer"}}]}"#]),
+            sse(&[r#"{"choices":[{"delta":{"content":"unsaved answer"}}]}"#]),
+            sse(&[r#"{"choices":[{"delta":{"content":"retry answer"}}]}"#]),
+        ]);
+        let root = std::env::temp_dir();
+        let mut agent = test_agent(&base);
+        agent
+            .ask("kept question", &root, &mut |_| Ok(()), &mut |_| {})
+            .unwrap();
+        let before = agent.messages.clone();
+        let error = agent
+            .ask_with_finish(
+                "unsaved question",
+                &root,
+                &mut |_| Ok(()),
+                &mut |_| Ok(()),
+                &mut |answer, _| {
+                    assert_eq!(answer, "unsaved answer");
+                    Err(crate::error::Error::internal(
+                        "output or persistence failed",
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert!(error.message().contains("failed"));
+        assert_eq!(agent.messages, before);
+        agent
+            .ask("retry", &root, &mut |_| Ok(()), &mut |_| {})
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[2].contains("kept question"));
+        assert!(!requests[2].contains("unsaved question"));
+        assert!(!requests[2].contains("unsaved answer"));
+    }
+
+    #[test]
+    fn failed_tool_display_stops_the_turn_and_rolls_back_history() {
+        let (base, server) = serve(vec![tool_call("ls", "{}")]);
+        let mut agent = test_agent(&base);
+        let error = agent
+            .ask_with_finish(
+                "list files",
+                &std::env::temp_dir(),
+                &mut |_| Ok(()),
+                &mut |_| Err(crate::error::Error::internal("tool display failed")),
+                &mut |_, _| panic!("failed tool rounds must not commit"),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("tool display failed"));
+        assert!(agent.messages.is_empty());
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[test]

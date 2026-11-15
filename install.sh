@@ -129,7 +129,7 @@ install_zsh_integration() {
   marker='# >>> wut shell integration >>>'
 
   mkdir -p "$wut_config" "$zsh_dir"
-  integration_staged="$integration.tmp.$$"
+  integration_staged="$(mktemp "$integration.tmp.XXXXXXXX")" || error "could not stage zsh integration"
   printf '%s\n' \
     '# Managed by the wut installer. Re-run install.sh to refresh.' \
     "alias wut='noglob command wut'" \
@@ -283,7 +283,7 @@ main() {
 
   mkdir -p "$install_dir"
   [ ! -d "$install_dir/wut" ] || error "$install_dir/wut is a directory"
-  staged="$install_dir/.wut-install.$$"
+  staged="$(mktemp "$install_dir/.wut-install.XXXXXXXX")" || error "could not stage wut"
   cp "$source_binary" "$staged"
   chmod 755 "$staged"
 

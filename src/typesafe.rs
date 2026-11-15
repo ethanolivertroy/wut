@@ -90,14 +90,20 @@ impl Client {
     ) -> std::result::Result<Answers, Failure> {
         let body = request_body(state, questions).to_string();
         let url = format!("{}/v1/systemone", self.base_url);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(deadline.saturating_duration_since(Instant::now()))
-            .build();
+        let budget = deadline.saturating_duration_since(Instant::now());
+        if budget.is_zero() {
+            return Err(out_of_time(budget));
+        }
+        let agent = ureq::AgentBuilder::new().timeout_connect(budget).build();
         let mut attempt = 1;
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(out_of_time(budget));
+            }
             let result = agent
                 .post(&url)
-                .timeout(deadline.saturating_duration_since(Instant::now()))
+                .timeout(remaining)
                 .set("Authorization", &format!("Bearer {}", self.api_key))
                 .set("Content-Type", "application/json")
                 .send_string(&body);
@@ -118,7 +124,7 @@ impl Client {
                     if attempt < MAX_ATTEMPTS =>
                 {
                     let delay = retry_delay(&response, attempt);
-                    if Instant::now() + delay >= deadline {
+                    if delay >= deadline.saturating_duration_since(Instant::now()) {
                         return Err(request_failure(ureq::Error::Status(status, response)));
                     }
                     thread::sleep(delay);
@@ -491,6 +497,36 @@ pub mod tests {
             failure.error.message(),
             "TypeSafe did not answer within 100ms"
         );
+    }
+
+    #[test]
+    fn excessive_retry_after_values_do_not_overflow_the_deadline() {
+        let server = Server::start(vec![(
+            Duration::ZERO,
+            http(
+                "429 Too Many Requests",
+                "Retry-After: 10000000000000000000\r\n",
+                "{}",
+            ),
+        )]);
+        let failure = ask(&server, Duration::from_secs(2)).unwrap_err();
+        assert!(failure.error.message().contains("HTTP 429"));
+        assert!(!failure.permanent);
+        assert_eq!(server.connections(), 1);
+    }
+
+    #[test]
+    fn an_expired_worker_deadline_never_starts_an_unbounded_request() {
+        let client = Client::for_test("http://127.0.0.1:0");
+        let failure = client
+            .send(
+                &json!({}),
+                &json!({}),
+                Instant::now() - Duration::from_millis(1),
+            )
+            .unwrap_err();
+        assert!(failure.error.message().contains("did not answer within"));
+        assert!(!failure.permanent);
     }
 
     #[test]

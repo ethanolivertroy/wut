@@ -1,11 +1,13 @@
 """Exercise installer credential setup with fake binaries and no real keys."""
 
 import os
+import io
 from pathlib import Path
 import pty
 import select
 import subprocess
 import tempfile
+import tarfile
 import time
 import unittest
 
@@ -181,6 +183,51 @@ class CredentialsInstallerTests(unittest.TestCase):
         self.assertEqual(code, 7, output)
         self.assertEqual(self.invocations.read_text(), "--set-key cerebras\n")
         self.assertFalse(self.directory.exists())
+
+    def test_zsh_staging_does_not_follow_a_predictable_temporary_symlink(self):
+        victim = self.root / "victim"
+        victim.write_text("untouched")
+        environment = dict(self.environment, HOME=str(self.root), SHELL="/bin/zsh")
+        command = FUNCTIONS + '''
+mkdir -p "$XDG_CONFIG_HOME/wut"
+ln -s "$HOME/victim" "$XDG_CONFIG_HOME/wut/zsh-integration.zsh.tmp.$$"
+install_zsh_integration
+'''
+        result = subprocess.run(["sh", "-c", command], env=environment,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_text(), "untouched")
+        integration = self.directory / "zsh-integration.zsh"
+        self.assertFalse(integration.is_symlink())
+        self.assertIn("noglob", integration.read_text())
+
+    def test_binary_staging_does_not_follow_a_predictable_temporary_symlink(self):
+        victim = self.root / "victim"
+        victim.write_text("untouched")
+        archive = self.root / "fixture.tar.gz"
+        binary = b"#!/bin/sh\necho 1.2.3\n"
+        with tarfile.open(archive, "w:gz") as tar:
+            info = tarfile.TarInfo("wut")
+            info.mode = 0o755
+            info.size = len(binary)
+            tar.addfile(info, io.BytesIO(binary))
+        environment = dict(self.environment, HOME=str(self.root), SHELL="/bin/sh",
+                           WUT_INSTALL_DIR=str(self.install_directory),
+                           WUT_TEST_ARCHIVE=str(archive), CEREBRAS_API_KEY="fixture")
+        command = FUNCTIONS + '''
+VERSION=1.2.3
+download_release_assets() { cp "$WUT_TEST_ARCHIVE" "$3/$2"; }
+verify_checksum() { :; }
+ln -s "$HOME/victim" "$WUT_INSTALL_DIR/.wut-install.$$"
+main
+'''
+        result = subprocess.run(["sh", "-c", command], env=environment,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_text(), "untouched")
+        installed = self.install_directory / "wut"
+        self.assertFalse(installed.is_symlink())
+        self.assertEqual(installed.read_bytes(), binary)
 
 
 if __name__ == "__main__":

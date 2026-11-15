@@ -15,12 +15,10 @@ pub struct TerminalRenderer<W = io::Stdout> {
     pending: String,
     /// The current paragraph already has text on screen; pending holds only
     /// the suffix whose inline Markdown could still change with more input.
-    plain_streaming: bool,
-    code: Option<CodeBlock>,
+    block: BlockState,
     wrote: bool,
     ends_with_newline: bool,
-    list_active: bool,
-    list_has_children: bool,
+    list: ListState,
     response_color: ResponseColor,
     /// Plain text written since the model's current round began, so the
     /// round can be redrawn as narration if it ends in tool calls.
@@ -34,7 +32,22 @@ pub struct TerminalRenderer<W = io::Stdout> {
 }
 
 #[derive(Default)]
+enum BlockState {
+    #[default]
+    Line,
+    Paragraph,
+    Code(CodeBlock),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ListState {
+    None,
+    Item,
+    Children,
+}
+
 struct CodeBlock {
+    fence: usize,
     language: String,
     lines: Vec<String>,
 }
@@ -52,12 +65,10 @@ impl<W: Write> TerminalRenderer<W> {
         Self {
             output,
             pending: String::new(),
-            plain_streaming: false,
-            code: None,
+            block: BlockState::Line,
             wrote: false,
             ends_with_newline: false,
-            list_active: false,
-            list_has_children: false,
+            list: ListState::None,
             response_color,
             round: String::new(),
             size: None,
@@ -71,15 +82,14 @@ impl<W: Write> TerminalRenderer<W> {
     /// rather than the answer. Blank lines are dropped. Output taller than the
     /// screen is left as it is, since the cursor can't reach it.
     pub fn dim_round(&mut self) -> Result<()> {
-        if !self.pending.is_empty() || self.plain_streaming {
+        if !self.pending.is_empty() || matches!(self.block, BlockState::Paragraph) {
             let line = std::mem::take(&mut self.pending);
             self.complete_line(&line)?;
         }
-        if let Some(block) = self.code.take() {
+        if let Some(block) = self.take_code() {
             self.draw_code(block)?;
         }
-        self.list_active = false;
-        self.list_has_children = false;
+        self.list = ListState::None;
         let written = std::mem::take(&mut self.round);
         if std::mem::take(&mut self.round_has_image) || written.is_empty() {
             return Ok(());
@@ -120,7 +130,9 @@ impl<W: Write> TerminalRenderer<W> {
     }
 
     fn stream_paragraph(&mut self) -> Result<()> {
-        if self.code.is_some() || (!self.plain_streaming && !plain_line_ready(&self.pending)) {
+        if matches!(self.block, BlockState::Code(_))
+            || (matches!(self.block, BlockState::Line) && !plain_line_ready(&self.pending))
+        {
             return Ok(());
         }
         let ready = inline_ready_prefix(&self.pending);
@@ -134,27 +146,27 @@ impl<W: Write> TerminalRenderer<W> {
         // while waiting on the network or being interrupted with Ctrl-C.
         self.write(&format!("{color}{rendered}{reset}"))?;
         self.pending.drain(..ready);
-        self.plain_streaming = true;
-        self.list_active = false;
-        self.list_has_children = false;
+        self.block = BlockState::Paragraph;
+        self.list = ListState::None;
         Ok(())
     }
 
     fn complete_line(&mut self, line: &str) -> Result<()> {
-        if !std::mem::take(&mut self.plain_streaming) {
+        if !matches!(self.block, BlockState::Paragraph) {
             return self.line(line);
         }
+        self.block = BlockState::Line;
         let color = self.response_color.ansi();
         self.write(&self.response_line(&render_inline(line, color)))
     }
 
     pub fn finish(mut self) -> Result<()> {
-        if !self.pending.is_empty() || self.plain_streaming {
+        if !self.pending.is_empty() || matches!(self.block, BlockState::Paragraph) {
             let line = std::mem::take(&mut self.pending);
             self.complete_line(&line)?;
         }
 
-        if let Some(block) = self.code.take() {
+        if let Some(block) = self.take_code() {
             self.draw_code(block)?;
         }
 
@@ -168,22 +180,28 @@ impl<W: Write> TerminalRenderer<W> {
         let line: &str = &printable(line);
         // Models often open a round with blank lines; skip them so the text
         // starts right under the prompt or the last tool line.
-        if self.code.is_none() && self.round.is_empty() && line.trim().is_empty() {
+        if !matches!(self.block, BlockState::Code(_))
+            && self.round.is_empty()
+            && line.trim().is_empty()
+        {
             return Ok(());
         }
-        if let Some(block) = &mut self.code {
-            if line.trim_start().starts_with("```") {
-                let block = self.code.take().expect("code block exists");
+        if let BlockState::Code(block) = &mut self.block {
+            let closing = line.trim();
+            if closing.len() >= block.fence && closing.bytes().all(|byte| byte == b'`') {
+                let block = self.take_code().expect("code block exists");
                 self.draw_code(block)
             } else {
                 block.lines.push(line.to_owned());
                 Ok(())
             }
-        } else if let Some(language) = line.trim_start().strip_prefix("```") {
-            self.list_active = false;
-            self.list_has_children = false;
-            self.code = Some(CodeBlock {
-                language: language.trim().to_owned(),
+        } else if line.trim_start().starts_with("```") {
+            let opening = line.trim_start();
+            let fence = opening.bytes().take_while(|byte| *byte == b'`').count();
+            self.list = ListState::None;
+            self.block = BlockState::Code(CodeBlock {
+                fence,
+                language: opening[fence..].trim().to_owned(),
                 lines: Vec::new(),
             });
             Ok(())
@@ -192,10 +210,18 @@ impl<W: Write> TerminalRenderer<W> {
         }
     }
 
+    fn take_code(&mut self) -> Option<CodeBlock> {
+        if matches!(self.block, BlockState::Code(_))
+            && let BlockState::Code(block) = std::mem::take(&mut self.block)
+        {
+            return Some(block);
+        }
+        None
+    }
+
     fn draw_markdown_line(&mut self, line: &str) -> Result<()> {
         if let Some(heading) = heading(line) {
-            self.list_active = false;
-            self.list_has_children = false;
+            self.list = ListState::None;
             return self.write(&format!(
                 "{BOLD}{CYAN}{}{RESET}\n",
                 render_inline(heading, "")
@@ -203,8 +229,7 @@ impl<W: Write> TerminalRenderer<W> {
         }
 
         if let Some(quote) = line.trim_start().strip_prefix("> ") {
-            self.list_active = false;
-            self.list_has_children = false;
+            self.list = ListState::None;
             let color = self.response_color.ansi();
             let rendered = render_inline(quote, color);
             let line = if color.is_empty() {
@@ -216,26 +241,25 @@ impl<W: Write> TerminalRenderer<W> {
         }
 
         if is_rule(line) {
-            self.list_active = false;
-            self.list_has_children = false;
+            self.list = ListState::None;
             return self.write(&format!("{DARK_GRAY}────────────────────────{RESET}\n"));
         }
 
         if let Some((nested, content)) = list_item(line) {
             if nested {
-                self.list_active = true;
-                self.list_has_children = true;
+                self.list = ListState::Children;
                 return self.write(&self.response_line(&format!(
                     "    - {}",
                     render_inline(content, self.response_color.ansi())
                 )));
             }
 
-            if self.list_active && (self.list_has_children || content.ends_with(':')) {
+            if self.list != ListState::None
+                && (self.list == ListState::Children || content.ends_with(':'))
+            {
                 self.write("\n")?;
             }
-            self.list_active = true;
-            self.list_has_children = false;
+            self.list = ListState::Item;
             return self.write(&self.response_line(&format!(
                 "  • {}",
                 render_inline(content, self.response_color.ansi())
@@ -243,8 +267,7 @@ impl<W: Write> TerminalRenderer<W> {
         }
 
         if let Some((number, content)) = ordered_list_item(line) {
-            self.list_active = true;
-            self.list_has_children = false;
+            self.list = ListState::Item;
             let color = self.response_color.ansi();
             let rendered = render_inline(content, color);
             let line = if color.is_empty() {
@@ -255,8 +278,7 @@ impl<W: Write> TerminalRenderer<W> {
             return self.write(&line);
         }
 
-        self.list_active = false;
-        self.list_has_children = false;
+        self.list = ListState::None;
         self.write(&self.response_line(&render_inline(line, self.response_color.ansi())))
     }
 
@@ -696,6 +718,24 @@ mod tests {
         ));
         assert!(text.contains("│ # not a heading │"), "{text}");
         assert!(text.contains("│ - not a list    │"), "{text}");
+    }
+
+    #[test]
+    fn code_fences_only_close_with_a_matching_bare_delimiter() {
+        for source in [
+            "````markdown\n```rust\nlet x = 1;\n```\n````\nafter\n",
+            "```markdown\n```rust\nlet x = 1;\n``` extra\n```\nafter\n",
+        ] {
+            let whole = render(&[source], ResponseColor::Default);
+            let pieces: Vec<String> = source.chars().map(String::from).collect();
+            let pieces: Vec<&str> = pieces.iter().map(String::as_str).collect();
+            assert_eq!(render(&pieces, ResponseColor::Default), whole);
+            let text = plain(&whole);
+            assert!(text.contains("│ ```rust"), "{text}");
+            assert!(text.contains("│ let x = 1;"), "{text}");
+            assert_eq!(text.matches('┌').count(), 1, "{text}");
+            assert!(text.ends_with("after\n"), "{text}");
+        }
     }
 
     #[test]
