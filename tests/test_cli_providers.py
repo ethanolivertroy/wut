@@ -3,7 +3,6 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
-import socket
 import subprocess
 import tempfile
 import threading
@@ -61,7 +60,11 @@ class ProviderCliTests(unittest.TestCase):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append((self.path, self.headers["Authorization"], body))
-                status, headers, content = responses.pop(0) if responses else (500, {}, "")
+                response = responses.pop(0) if responses else (500, {}, "")
+                if response is None:
+                    self.close_connection = True
+                    return
+                status, headers, content = response
                 self.send_response(status)
                 for key, value in headers.items():
                     self.send_header(key, value)
@@ -173,17 +176,17 @@ class ProviderCliTests(unittest.TestCase):
         self.assertIn("no saved session", result.stderr)
         self.assertEqual(len(requests), 1)
 
-    def test_tinfoil_connection_errors_explain_how_to_start_the_proxy(self):
+    def test_tinfoil_transport_errors_explain_how_to_start_the_proxy(self):
         self.environment.update({"TINFOIL_API_KEY": "fake-tinfoil-secret", "TINFOIL_PROXY_PORT": "0"})
         result = self.run_cli("--model", "tinfoil:gpt-oss-120b", "hello")
         self.assertEqual(result.returncode, 1)
         self.assertIn("TINFOIL_PROXY_PORT must be an integer", result.stderr)
-        # Reserve a port without listening so the connection fails locally.
-        with socket.socket() as reserved:
-            reserved.bind(("127.0.0.1", 0))
-            self.environment["TINFOIL_PROXY_PORT"] = str(reserved.getsockname()[1])
-            result = self.run_cli("--model", "tinfoil:gpt-oss-120b", "hello")
+        # Close an accepted request without a response. A bound but non-listening
+        # socket drops connection attempts on macOS instead of refusing them.
+        requests = self.proxy([None])
+        result = self.run_cli("--model", "tinfoil:gpt-oss-120b", "hello")
         self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(requests), 1)
         self.assertIn("Tinfoil local proxy", result.stderr)
         self.assertIn("start 'tinfoil-proxy'", result.stderr)
         self.assertNotIn("fake-tinfoil-secret", result.stderr)
