@@ -2,12 +2,34 @@
 
 ## Unreleased
 
+## 0.0.6 — 2026-11-15
+
+- Add DeepSeek V4.1 Flash 1017 Fast and Ultrafast through Vercel AI Gateway,
+  with provider-specific credentials and supported reasoning settings.
+- Extend hidden API-key setup to Cerebras, Groq and Vercel AI Gateway through
+  `--set-key` and settings. Keep each provider's saved key separate and enforce
+  private file permissions, ownership and link checks.
+- Commit chat history only after output and session saving succeed. Restore
+  previous session state on save failure, stop on tool-display errors, and
+  check cancellation before committing an answer.
+- Preserve permanent TypeSafe triage failures across settings changes. Keep
+  temporary failures retryable, enforce request deadlines, and handle very long
+  retry delays without overflowing.
+- Keep update notices pending until displayed successfully. Retry failed or
+  abandoned update checks after a short lease and serialize cache updates so
+  refreshes and notifications preserve each other's changes.
+- Track Markdown block and list states explicitly. Respect code-fence lengths
+  and bare closing delimiters, and fix cursor positioning for command suggestions.
+- Publish npm binaries atomically, preserve existing cache entries on failure,
+  support custom cache roots, and forward repeated signals while preserving
+  the binary's signal exit status.
+- Use exclusive temporary files for installer and shell-integration updates.
+  Failed storage writes clean up only temporary files owned by the current writer.
 - Stop workspace traversal as soon as `grep` reaches its match limit. Bound
   directory listing work and output, and avoid redundant file metadata calls.
 - Bound config, session and update-cache reads to regular files and explicit
   size limits. Reject pipes without blocking and preserve existing saved data
   when a new save exceeds its loader's limit.
-
 - Compile workspace globs once per search, add fast paths for literals and
   suffixes, and replace recursive wildcard backtracking with a bounded regex
   matcher. Reject glob patterns longer than 512 bytes.
@@ -23,6 +45,8 @@
 - Download npm release archives and checksums concurrently, with a shared
   60-second deadline and bounded response sizes. Cancel failed download pairs
   and preserve an existing cached binary on failure.
+- Clarify installation and everyday usage in the README. Remove the vendored
+  TypeSafe coding-agent skill and lockfile while keeping the Rust integration.
 
 ## 0.0.5 — 2026-11-08
 
