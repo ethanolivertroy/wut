@@ -1,7 +1,7 @@
 {
   "wut": {
     "folder": "wut",
-    "entries": [".agents/", ".github/", "assets/", "Cargo.lock", "Cargo.toml", "install.sh", "LICENSE", "README.md", "skills-lock.json", "src/"]
+    "entries": [".github/", "assets/", "Cargo.lock", "Cargo.toml", "install.sh", "LICENSE", "README.md", "src/"]
   },
   "webapp": {
     "folder": "storefront",
