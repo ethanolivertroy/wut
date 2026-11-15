@@ -29,7 +29,12 @@ pub fn run(provider: Option<Provider>) -> Result<()> {
         Some(provider) => provider,
         None => {
             let _screen = select::Screen::enter()?;
-            let providers = [Provider::Cerebras, Provider::Groq, Provider::AiGateway];
+            let providers = [
+                Provider::Cerebras,
+                Provider::Groq,
+                Provider::AiGateway,
+                Provider::Tinfoil,
+            ];
             let items: Vec<_> = providers
                 .iter()
                 .map(|provider| Item::new(provider.name(), "Save or replace its API key"))
@@ -285,6 +290,7 @@ fn directory(root: &Path, provider: Provider, create: bool) -> Result<Option<Fil
         Provider::Cerebras => &[c"wut"],
         Provider::AiGateway => &[c"wut", c"ai-gateway"],
         Provider::Groq => &[c"wut", c"groq"],
+        Provider::Tinfoil => &[c"wut", c"tinfoil"],
     };
     for name in components {
         if create {
@@ -516,7 +522,12 @@ mod tests {
     fn saves_and_replaces_all_providers_privately_without_crossing_keys() {
         let root = Root::new();
         chmod(&root.0, 0o755);
-        for provider in [Provider::Cerebras, Provider::Groq, Provider::AiGateway] {
+        for provider in [
+            Provider::Cerebras,
+            Provider::Groq,
+            Provider::AiGateway,
+            Provider::Tinfoil,
+        ] {
             save_at(&root.0, provider, provider.id()).unwrap();
             assert_eq!(
                 load_at(&root.0, provider).unwrap().as_deref(),
@@ -587,7 +598,12 @@ mod tests {
 
     #[test]
     fn rejects_managed_directory_symlinks_for_load_and_save() {
-        for provider in [Provider::Cerebras, Provider::Groq, Provider::AiGateway] {
+        for provider in [
+            Provider::Cerebras,
+            Provider::Groq,
+            Provider::AiGateway,
+            Provider::Tinfoil,
+        ] {
             let root = Root::new();
             save_at(&root.0, provider, "old-key").unwrap();
             let path = root.key(provider).parent().unwrap().to_path_buf();

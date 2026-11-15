@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add optional Tinfoil models through the official local proxy, separate hidden
+  key setup and credentials, and loopback-only requests with custom port support.
+- Document how to upgrade an older binary when `--set-key` is unavailable and
+  how to resolve multiple installations in `PATH`. Missing-key errors now point
+  directly to the provider's `--set-key` command.
+
 ## 0.0.6 — 2026-11-15
 
 - Add DeepSeek V4.1 Flash 1017 Fast and Ultrafast through Vercel AI Gateway,

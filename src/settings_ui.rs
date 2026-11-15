@@ -258,7 +258,7 @@ fn select_model(settings: &mut impl EditableSettings) -> Result<()> {
         .unwrap_or(0);
     let Choice::Selected(index) = select::choose(
         "Model",
-        "Cerebras, Groq, and Vercel AI Gateway",
+        "Cerebras, Groq, Vercel AI Gateway, and Tinfoil",
         &items,
         selected,
     )?
@@ -337,6 +337,8 @@ fn supports_reasoning(model: &Model, reasoning: Option<&str>) -> bool {
 fn reasoning_description(level: &str) -> String {
     match level {
         "none" => "No extra thinking".to_owned(),
+        "minimal" => "Minimal reasoning".to_owned(),
+        "xhigh" => "Extra high reasoning".to_owned(),
         "low" => "Low reasoning".to_owned(),
         "medium" => "Balanced reasoning".to_owned(),
         "high" => "Deep reasoning".to_owned(),
@@ -391,6 +393,10 @@ mod tests {
     #[test]
     fn key_entry_uses_the_selected_models_provider() {
         assert_eq!(provider_for_model(None), Provider::Cerebras);
+        assert_eq!(
+            provider_for_model(Some("tinfoil:gpt-oss-120b")),
+            Provider::Tinfoil
+        );
         assert_eq!(
             provider_for_model(Some("groq:openai/gpt-oss-20b")),
             Provider::Groq

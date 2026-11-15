@@ -11,7 +11,7 @@ pub const HELP: &str = concat!(
     "  wut -c [QUESTION...]\n",
     "  wut --sessions\n",
     "  wut --settings\n",
-    "  wut --set-key [cerebras|groq|ai-gateway]\n",
+    "  wut --set-key [cerebras|groq|ai-gateway|tinfoil]\n",
     "  wut --models\n",
     "  wut --benchmark [--model MODEL]\n",
     "  wut --upgrade\n",
@@ -271,7 +271,7 @@ fn parse_set_key(args: &[OsString]) -> Result<Invocation> {
     let invalid = || {
         Error::new(
             "--set-key accepts only an optional provider, with no other arguments",
-            "run 'wut --set-key [cerebras|groq|ai-gateway]'; enter the key only at the hidden prompt",
+            "run 'wut --set-key [cerebras|groq|ai-gateway|tinfoil]'; enter the key only at the hidden prompt",
         )
     };
     if args.first().is_none_or(|arg| arg != "--set-key") || args.len() > 2 {
@@ -282,6 +282,7 @@ fn parse_set_key(args: &[OsString]) -> Result<Invocation> {
         Some("cerebras") => Some(Provider::Cerebras),
         Some("groq") => Some(Provider::Groq),
         Some("ai-gateway") => Some(Provider::AiGateway),
+        Some("tinfoil") => Some(Provider::Tinfoil),
         _ => return Err(invalid()),
     };
     Ok(Invocation::plain(Mode::SetKey(provider)))
@@ -376,6 +377,7 @@ mod tests {
             ("cerebras", Provider::Cerebras),
             ("groq", Provider::Groq),
             ("ai-gateway", Provider::AiGateway),
+            ("tinfoil", Provider::Tinfoil),
         ] {
             assert_eq!(
                 args(&["--set-key", name]).unwrap(),

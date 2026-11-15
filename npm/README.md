@@ -26,6 +26,12 @@ wut --set-key groq
 wut --set-key ai-gateway
 ```
 
+`--set-key` needs wut v0.0.6 or newer. If it is an unknown option, run
+`npm install --global wut-cli@latest`, then `hash -r` or open a new terminal.
+Check `wut --version` and `type -a wut`: an older Cargo, Homebrew, or shell
+installation earlier in `PATH` can hide the npm binary. Upgrade the installation
+your shell actually uses; see [setup troubleshooting](https://github.com/ethanolivertroy/wut#set-up-an-api-key).
+
 Run `wut --set-key` to choose a provider, or use **API key** in
 `wut --settings`. Never pass the key itself as an argument. Then select a model:
 
@@ -45,6 +51,16 @@ environment override saved keys for their provider. The
 [credential documentation](https://github.com/ethanolivertroy/wut#install) lists
 the per-provider paths and `$XDG_CONFIG_HOME` support. The npm wrapper itself
 does not save credentials.
+
+## Tinfoil (upcoming)
+
+Optional [Tinfoil local proxy support](https://github.com/ethanolivertroy/wut#tinfoil-local-proxy)
+is available in source and will ship in the next release. It is **not included
+in v0.0.6**. A source build uses `wut --set-key tinfoil` or `TINFOIL_API_KEY`,
+model IDs such as `tinfoil:gpt-oss-120b`, and the separately installed official
+`tinfoil-proxy` running at `http://127.0.0.1:3301/v1`. Set `TINFOIL_PROXY_PORT`
+to match a custom proxy port. The proxy handles attestation; wut keeps requests
+on loopback and does not fall back to direct API access.
 
 ## Other install methods
 
