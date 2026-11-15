@@ -65,6 +65,54 @@ pub const MODELS: &[Model] = &[
         default_reasoning: Some("none"),
         levels: &["none", "low", "high", "max"],
     },
+    Model {
+        id: "tinfoil:gpt-oss-120b",
+        provider: Provider::Tinfoil,
+        name: "GPT OSS 120B (Tinfoil)",
+        description: "Tinfoil local proxy · low reasoning by default",
+        default_reasoning: Some("low"),
+        levels: &["low", "medium", "high"],
+    },
+    Model {
+        id: "tinfoil:kimi-k3-1-pro",
+        provider: Provider::Tinfoil,
+        name: "Kimi K3.1 Pro (Tinfoil)",
+        description: "Tinfoil local proxy · coding and tool use",
+        default_reasoning: Some("low"),
+        levels: &["low", "high", "max"],
+    },
+    Model {
+        id: "tinfoil:glm-5-3",
+        provider: Provider::Tinfoil,
+        name: "GLM 5.3 (Tinfoil)",
+        description: "Tinfoil local proxy · coding and long context",
+        default_reasoning: Some("low"),
+        levels: &["low", "high", "max"],
+    },
+    Model {
+        id: "tinfoil:deepseek-v4-1-flash",
+        provider: Provider::Tinfoil,
+        name: "DeepSeek V4.1 Flash (Tinfoil)",
+        description: "Tinfoil local proxy · experimental model",
+        default_reasoning: Some("none"),
+        levels: &["none", "low", "high", "xhigh", "max"],
+    },
+    Model {
+        id: "tinfoil:gemma4-31b",
+        provider: Provider::Tinfoil,
+        name: "Gemma 4 31B (Tinfoil)",
+        description: "Tinfoil local proxy · configurable reasoning",
+        default_reasoning: Some("none"),
+        levels: &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    },
+    Model {
+        id: "tinfoil:llama3-3-70b",
+        provider: Provider::Tinfoil,
+        name: "Llama 3.3 70B (Tinfoil)",
+        description: "Tinfoil local proxy · no reasoning trace",
+        default_reasoning: Some("none"),
+        levels: &["none"],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +120,7 @@ pub enum Provider {
     Cerebras,
     Groq,
     AiGateway,
+    Tinfoil,
 }
 
 impl Provider {
@@ -80,6 +129,7 @@ impl Provider {
             Self::Cerebras => "Cerebras",
             Self::Groq => "Groq",
             Self::AiGateway => "Vercel AI Gateway",
+            Self::Tinfoil => "Tinfoil",
         }
     }
 
@@ -88,6 +138,7 @@ impl Provider {
             Self::Cerebras => "cerebras",
             Self::Groq => "groq",
             Self::AiGateway => "ai-gateway",
+            Self::Tinfoil => "tinfoil",
         }
     }
 
@@ -96,6 +147,7 @@ impl Provider {
             Self::Cerebras => "wut/credentials",
             Self::Groq => "wut/groq/credentials",
             Self::AiGateway => "wut/ai-gateway/credentials",
+            Self::Tinfoil => "wut/tinfoil/credentials",
         }
     }
 
@@ -104,6 +156,7 @@ impl Provider {
             Self::Cerebras => ENV_KEY,
             Self::Groq => "GROQ_API_KEY",
             Self::AiGateway => "AI_GATEWAY_API_KEY",
+            Self::Tinfoil => "TINFOIL_API_KEY",
         }
     }
 
@@ -112,6 +165,7 @@ impl Provider {
             Self::Cerebras => DEFAULT_BASE_URL,
             Self::Groq => "https://api.groq.com/openai/v1",
             Self::AiGateway => "https://ai-gateway.vercel.sh/v1",
+            Self::Tinfoil => "http://127.0.0.1:3301/v1",
         }
     }
 }
@@ -127,7 +181,10 @@ pub struct Model {
 
 impl Model {
     pub fn api_id(&self) -> &'static str {
-        self.id.strip_prefix("groq:").unwrap_or(self.id)
+        self.id
+            .strip_prefix("groq:")
+            .or_else(|| self.id.strip_prefix("tinfoil:"))
+            .unwrap_or(self.id)
     }
 
     pub fn validate_reasoning(&self, level: &str) -> Result<()> {
@@ -192,7 +249,7 @@ pub struct Message {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
-    /// Kept for Gateway tool rounds, never displayed as answer text.
+    /// Kept for Gateway and Tinfoil tool rounds, never displayed as answer text.
     pub reasoning: Option<String>,
 }
 
@@ -263,8 +320,10 @@ impl Message {
         if let Some(id) = &self.tool_call_id {
             value["tool_call_id"] = Value::String(id.clone());
         }
-        if provider == Provider::AiGateway && self.role == Role::Assistant {
-            // Gateway converts this normalized field to DeepSeek reasoning_content.
+        if matches!(provider, Provider::AiGateway | Provider::Tinfoil)
+            && self.role == Role::Assistant
+        {
+            // Gateway and Tinfoil use this normalized reasoning field.
             // Empty values also handle history from non-thinking models.
             value["reasoning"] = json!(self.reasoning.as_deref().unwrap_or_default());
         }
@@ -352,12 +411,18 @@ impl Client {
 
     pub fn new(model: &str) -> Result<Self> {
         let provider = require_model(model)?.provider;
+        // The local proxy must never be routed through an environment HTTP proxy.
+        let proxy_from_env = provider != Provider::Tinfoil;
         Ok(Self {
             api_key: auth_key(provider)?,
-            base_url: provider.base_url().to_owned(),
+            base_url: if provider == Provider::Tinfoil {
+                tinfoil_base_url(std::env::var_os("TINFOIL_PROXY_PORT").as_deref())?
+            } else {
+                provider.base_url().to_owned()
+            },
             provider,
-            proxy_from_env: true,
-            http: http_agent(true),
+            proxy_from_env,
+            http: http_agent(proxy_from_env),
         })
     }
 
@@ -408,7 +473,22 @@ impl Client {
             ),
         ];
         let mut body = request_body(&messages, &[], model, effort);
-        body["response_format"] = json!({"type": "json_object"});
+        body["response_format"] = if self.provider == Provider::Tinfoil {
+            json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "wut_json_result",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"result": {}},
+                        "required": ["result"],
+                        "additionalProperties": false,
+                    },
+                },
+            })
+        } else {
+            json!({"type": "json_object"})
+        };
         let outcome = self.send_stream(body, &mut |_| Ok(()))?;
         if !outcome.tool_calls.is_empty() {
             return Err(json_format_error());
@@ -435,9 +515,26 @@ impl Client {
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string())
-            .map_err(api_error)?;
+            .map_err(|error| {
+                if self.provider == Provider::Tinfoil
+                    && matches!(error, ureq::Error::Transport(_))
+                {
+                    Error::new(
+                        "could not reach the Tinfoil local proxy or the request timed out",
+                        format!("start 'tinfoil-proxy' at {}; if using a custom port, set TINFOIL_PROXY_PORT", self.base_url),
+                    )
+                } else {
+                    api_error(error)
+                }
+            })?;
 
         let status = response.status();
+        if self.provider == Provider::Tinfoil && (300..400).contains(&status) {
+            return Err(Error::new(
+                "the Tinfoil local proxy returned a redirect; wut did not follow it",
+                "run the official 'tinfoil-proxy' on the configured local port",
+            ));
+        }
         if status != 200 {
             let body = response.into_string().unwrap_or_default();
             return Err(api_status_error(status, &body));
@@ -445,11 +542,29 @@ impl Client {
 
         let stream = EventStream::new(BufReader::new(response.into_reader()));
         let mut outcome = collect_stream(stream, on_delta)?;
-        if self.provider != Provider::AiGateway {
+        if !matches!(self.provider, Provider::AiGateway | Provider::Tinfoil) {
             outcome.reasoning = None;
         }
         Ok(outcome)
     }
+}
+
+fn tinfoil_base_url(port: Option<&std::ffi::OsStr>) -> Result<String> {
+    let Some(port) = port else {
+        return Ok(Provider::Tinfoil.base_url().to_owned());
+    };
+    let port = port
+        .to_str()
+        .filter(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            Error::new(
+                "TINFOIL_PROXY_PORT must be an integer from 1 to 65535",
+                "unset it to use the default Tinfoil proxy port 3301",
+            )
+        })?;
+    Ok(format!("http://127.0.0.1:{port}/v1"))
 }
 
 fn json_format_error() -> Error {
@@ -466,6 +581,8 @@ fn http_agent(proxy_from_env: bool) -> ureq::Agent {
 fn http_agent_with_timeout(timeout: Option<Duration>, proxy_from_env: bool) -> ureq::Agent {
     let builder = ureq::AgentBuilder::new()
         .try_proxy_from_env(proxy_from_env)
+        // Local clients (and test clients) must stay on their configured endpoint.
+        .redirects(if proxy_from_env { 5 } else { 0 })
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT);
     match timeout {
@@ -757,9 +874,10 @@ fn auth_key_from(
             provider.env_key()
         ),
         format!(
-            "set {}, or save a key to ~/.config/{} (under $XDG_CONFIG_HOME when set)",
-            provider.env_key(),
-            provider.credentials_file()
+            "run 'wut --set-key {}' to save a key (default ~/.config/{}), or set {}",
+            provider.id(),
+            provider.credentials_file(),
+            provider.env_key()
         ),
     ))
 }
@@ -1086,8 +1204,65 @@ mod tests {
     }
 
     #[test]
+    fn tinfoil_port_configuration_always_stays_on_loopback() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            super::tinfoil_base_url(None).unwrap(),
+            "http://127.0.0.1:3301/v1"
+        );
+        assert_eq!(
+            super::tinfoil_base_url(Some(OsStr::new("9443"))).unwrap(),
+            "http://127.0.0.1:9443/v1"
+        );
+        for port in [
+            "",
+            "0",
+            "65536",
+            "-1",
+            "+3301",
+            " 3301",
+            "example.com",
+            "3301/v1",
+            "3301?key=secret",
+        ] {
+            let error = super::tinfoil_base_url(Some(OsStr::new(port))).unwrap_err();
+            assert!(error.message().contains("TINFOIL_PROXY_PORT"));
+            assert!(!error.message().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn tinfoil_models_use_their_own_provider_and_supported_reasoning() {
+        for model in super::MODELS
+            .iter()
+            .filter(|model| model.provider == Provider::Tinfoil)
+        {
+            assert!(!model.api_id().contains(':'));
+            assert_eq!(model.provider.env_key(), "TINFOIL_API_KEY");
+            model
+                .validate_reasoning(model.default_reasoning.unwrap())
+                .unwrap();
+            model.validate_reasoning("auto").unwrap();
+        }
+        let kimi = super::require_model("tinfoil:kimi-k3-1-pro").unwrap();
+        assert!(kimi.validate_reasoning("medium").is_err());
+        assert!(kimi.validate_reasoning("none").is_err());
+        assert!(kimi.validate_reasoning("max").is_ok());
+        let oss = super::require_model("tinfoil:gpt-oss-120b").unwrap();
+        assert!(oss.validate_reasoning("none").is_err());
+        assert!(oss.validate_reasoning("medium").is_ok());
+        assert!(super::require_model("tinfoil:gemma4-31b").is_ok());
+        assert!(super::require_model("gemma-4-31b").is_err());
+    }
+
+    #[test]
     fn environment_keys_take_precedence_without_reading_saved_files() {
-        for provider in [Provider::Cerebras, Provider::Groq, Provider::AiGateway] {
+        for provider in [
+            Provider::Cerebras,
+            Provider::Groq,
+            Provider::AiGateway,
+            Provider::Tinfoil,
+        ] {
             assert_eq!(
                 super::auth_key_from(provider, Some("  environment-key  ".to_owned()), || {
                     panic!("a saved file must not be read when an environment key is set")

@@ -1,7 +1,8 @@
 # wut
 
 wut answers questions, recalls commands, and reads your workspace from the
-terminal. It uses Cerebras, Groq, or Vercel AI Gateway and cannot edit files or run commands.
+terminal. It uses Cerebras, Groq, Vercel AI Gateway, or an optional
+[Tinfoil local proxy](#tinfoil-local-proxy) and cannot edit files or run commands.
 
 https://github.com/user-attachments/assets/2c1c2660-7630-4688-80a2-8beebeacf2c0
 
@@ -29,6 +30,34 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ethanoli
 
 ## Set up an API key
 
+`--set-key` requires **wut v0.0.6 or newer**. If you see
+`unknown option '--set-key'`, check the binary your shell is running:
+
+```sh
+wut --version
+type -a wut
+```
+
+Update with the same method you used to install wut (choose one):
+
+```sh
+cargo install wut --locked --force
+npm install --global wut-cli@latest
+brew update && brew upgrade ethanolivertroy/wut/wut
+```
+
+For the shell installer, rerun the command in [Install](#install). Then run
+`hash -r` or open a new terminal, and check `wut --version` again. If `type -a wut`
+lists multiple copies, an older copy earlier in `PATH` may hide the updated one.
+The older message recommending only `CEREBRAS_API_KEY` also indicates an old binary.
+
+If Cargo reports a successful install but `wut` still behaves like an older
+version, try `~/.cargo/bin/wut --version` and
+`~/.cargo/bin/wut --set-key cerebras` directly. If those work, put
+`export PATH="$HOME/.cargo/bin:$PATH"` in your shell configuration and open a
+new terminal. `wut use v0.0.6` asks a question; it does not switch versions.
+If `type -a wut` shows an alias or shell function, update or remove that override.
+
 Get a key for the provider you want to use:
 [Cerebras](https://cloud.cerebras.ai/), [Groq](https://console.groq.com/keys), or
 [Vercel AI Gateway](https://vercel.com/ai-gateway). Save it with one of these
@@ -51,6 +80,7 @@ See [Saved credentials](#saved-credentials) for storage details.
 To keep your key in the process environment instead, set `CEREBRAS_API_KEY`,
 `GROQ_API_KEY`, or `AI_GATEWAY_API_KEY`. Each provider uses its own credentials;
 environment credentials take priority over saved credentials for that provider.
+For Tinfoil keys and the required proxy process, see [Tinfoil local proxy](#tinfoil-local-proxy).
 
 ## Use
 
@@ -129,6 +159,48 @@ images.
 
 ## Optional integrations
 
+### Tinfoil local proxy
+
+**Unreleased:** this provider requires a build from the current source
+(`cargo install --path . --locked --force` from a checkout). Published v0.0.6
+does not include Tinfoil support.
+
+Install the official [Tinfoil proxy](https://docs.tinfoil.sh/local-proxy/cli)
+separately, then keep it running in another terminal:
+
+```sh
+curl -fsSL https://github.com/tinfoilsh/tinfoil-proxy/raw/main/install.sh | sh
+tinfoil-proxy
+```
+
+Get a [Tinfoil API key](https://docs.tinfoil.sh/get-api-key), save it with hidden
+input, and select a Tinfoil model:
+
+```sh
+wut --set-key tinfoil
+wut --model tinfoil:gpt-oss-120b "how do I find the process on port 3000?"
+```
+
+You can also set `TINFOIL_API_KEY`, or choose a Tinfoil model and its key in
+`wut --settings`. `wut --models` lists all supported IDs. The catalog includes
+GPT OSS 120B, Kimi K3.1 Pro, GLM 5.3, Gemma 4 31B, Llama 3.3 70B, and experimental
+DeepSeek V4.1 Flash. wut defaults to low reasoning on GPT OSS, Kimi, and GLM,
+and `none` on the others; `--reasoning` accepts each model's supported levels.
+See Tinfoil's [chat catalog](https://docs.tinfoil.sh/models/chat) and
+[reasoning guide](https://docs.tinfoil.sh/guides/reasoning).
+
+wut connects to `http://127.0.0.1:3301/v1`. For a custom port, run
+`tinfoil-proxy -p 9443` and set `TINFOIL_PROXY_PORT=9443` for wut. Only the port
+is configurable; the address stays on loopback. wut bypasses environment HTTP
+proxies and refuses redirects for these requests. If the local proxy is down,
+wut reports an error; it never falls back to a direct Tinfoil API connection.
+
+The local proxy receives your key and prompts over local HTTP. The official
+proxy handles enclave attestation and the protected upstream connection; wut
+does not implement attestation itself. See the proxy documentation for current
+verification status, including the V3 beta. Only answer-model requests use this
+proxy: optional TypeSafe triage and Exa search still contact their own services.
+
 ### Web search with Exa
 
 Set `EXA_API_KEY` to enable web search. Once wut reads file contents for a
@@ -162,6 +234,7 @@ Each provider has a separate credential file:
 | Cerebras | `~/.config/wut/credentials` |
 | Groq | `~/.config/wut/groq/credentials` |
 | Vercel AI Gateway | `~/.config/wut/ai-gateway/credentials` |
+| Tinfoil (unreleased) | `~/.config/wut/tinfoil/credentials` |
 
 If you set `XDG_CONFIG_HOME`, wut uses it in place of `~/.config`. Saving writes
 the key atomically with mode `0600` and sets credential directories to `0700`.

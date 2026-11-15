@@ -111,7 +111,7 @@ class CredentialSetupTests(unittest.TestCase):
         return output
 
     def test_hidden_entry_and_backspace_save_each_provider_privately(self):
-        for provider in ("cerebras", "groq", "ai-gateway"):
+        for provider in ("cerebras", "groq", "ai-gateway", "tinfoil"):
             with self.subTest(provider=provider):
                 output = self.enter_key(provider, b"fixture-hidden-X\x7fY\r")
                 self.assertNotIn(b"fixture-hidden", output)
